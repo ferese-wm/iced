@@ -63,6 +63,20 @@ where
         delegate!(self, renderer, renderer.start_shaped_layer(bounds, outline));
     }
 
+    fn start_border_layer(
+        &mut self,
+        bounds: Rectangle,
+        border: core::Border,
+        snap: bool,
+        inset: f32,
+    ) {
+        delegate!(
+            self,
+            renderer,
+            renderer.start_border_layer(bounds, border, snap, inset)
+        );
+    }
+
     fn end_layer(&mut self) {
         delegate!(self, renderer, renderer.end_layer());
     }

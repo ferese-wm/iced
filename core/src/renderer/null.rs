@@ -17,6 +17,15 @@ impl Renderer for () {
     ) {
     }
 
+    fn start_border_layer(
+        &mut self,
+        _bounds: Rectangle,
+        _border: crate::Border,
+        _snap: bool,
+        _inset: f32,
+    ) {
+    }
+
     fn end_layer(&mut self) {}
 
     fn start_transformation(&mut self, _transformation: Transformation) {}

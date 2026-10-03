@@ -1,13 +1,23 @@
 //! Draw and stack layers of graphical primitives.
 use crate::core::border::Outline;
-use crate::core::{Rectangle, Size, Transformation};
+use crate::core::{Border, Rectangle, Size, Transformation};
 
 /// One explicitly shaped content group, distinct from a rectangular clip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapedClip {
     pub id: u64,
     pub outline: Option<Outline>,
+    pub local_border: Option<BorderClip>,
     pub bounds: Rectangle,
+}
+
+/// Local contour parameters retained until the physical pixel grid is known.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderClip {
+    pub radii: [f32; 4],
+    pub shape: crate::core::border::Shape,
+    pub inset: f32,
+    pub snap: bool,
 }
 
 impl ShapedClip {
@@ -17,7 +27,41 @@ impl ShapedClip {
         scale: f32,
         size: Size<u32>,
     ) -> Option<(Outline, Rectangle)> {
-        let outline = self.outline?.transformed([0.0; 2], scale as f64)?;
+        let (outline, bounds) = if let Some(border) = &self.local_border {
+            let mut bounds = self.bounds * scale;
+            if border.snap {
+                let x = (bounds.x + 0.001).round();
+                let y = (bounds.y + 0.001).round();
+                let right = (bounds.x + bounds.width + 0.001).round();
+                let bottom = (bounds.y + bounds.height + 0.001).round();
+                bounds = Rectangle {
+                    x,
+                    y,
+                    width: right - x,
+                    height: bottom - y,
+                };
+            }
+            let outline = if let Some(reference) = self.outline {
+                reference.transformed([0.0; 2], scale as f64)?
+            } else {
+                Outline::new(
+                    [bounds.x, bounds.y, bounds.width, bounds.height]
+                        .map(f64::from),
+                    border.radii.map(|r| f64::from(r * scale)),
+                    border.shape,
+                )?
+            }
+            .inset(f64::from(border.inset * scale))?;
+            // Quads intersect the reference contour with their draw rectangle.
+            // The inner border offsets both boundaries by the same distance.
+            let bounds = bounds.shrink(border.inset * scale);
+            (outline, bounds)
+        } else {
+            (
+                self.outline?.transformed([0.0; 2], scale as f64)?,
+                self.bounds * scale,
+            )
+        };
 
         if !outline
             .bounds()
@@ -35,8 +79,7 @@ impl ShapedClip {
             width: size.width as f32,
             height: size.height as f32,
         };
-        let bounds =
-            (self.bounds * scale).intersection(&viewport.expand(0.5))?;
+        let bounds = bounds.intersection(&viewport.expand(0.5))?;
         Some((outline, bounds))
     }
 }
@@ -180,20 +223,72 @@ impl<T: Layer> Stack<T> {
 
     /// Starts a shaped group, retaining its reference geometry through transforms.
     pub fn push_shaped_clip(&mut self, bounds: Rectangle, outline: Outline) {
+        self.push_reference_clip(bounds, Some(outline));
+    }
+
+    fn push_reference_clip(
+        &mut self,
+        bounds: Rectangle,
+        outline: Option<Outline>,
+    ) {
         self.flush();
         let transformation = self.transformation();
         let translation = transformation.translation();
         let bounds = bounds * transformation;
         let mut clips = self.layers[self.current].clips().clone();
-        let outline = outline.transformed(
-            [translation.x as f64, translation.y as f64],
-            transformation.scale_factor() as f64,
-        );
+        let outline = outline.and_then(|outline| {
+            outline.transformed(
+                [translation.x as f64, translation.y as f64],
+                transformation.scale_factor() as f64,
+            )
+        });
         let id = self.next_clip;
         self.next_clip += 1;
         clips.shapes.push(ShapedClip {
             id,
             outline,
+            local_border: None,
+            bounds,
+        });
+        self.push_layer(bounds, clips);
+    }
+
+    /// Defers local radius normalization until physical snapping; reference outlines stay fixed.
+    pub fn push_border_clip(
+        &mut self,
+        bounds: Rectangle,
+        border: Border,
+        snap: bool,
+        inset: f32,
+    ) {
+        self.flush();
+        let transformation = self.transformation();
+        let bounds = bounds * transformation;
+        let translation = transformation.translation();
+        let outline = border.outline.and_then(|outline| {
+            outline.transformed(
+                [translation.x as f64, translation.y as f64],
+                transformation.scale_factor() as f64,
+            )
+        });
+        let mut clips = self.layers[self.current].clips().clone();
+        let id = self.next_clip;
+        self.next_clip += 1;
+        let local_border = if border.outline.is_some() && outline.is_none() {
+            None
+        } else {
+            Some(BorderClip {
+                radii: <[f32; 4]>::from(border.radius)
+                    .map(|r| r * transformation.scale_factor()),
+                shape: border.shape,
+                inset: inset * transformation.scale_factor(),
+                snap,
+            })
+        };
+        clips.shapes.push(ShapedClip {
+            id,
+            outline,
+            local_border,
             bounds,
         });
         self.push_layer(bounds, clips);

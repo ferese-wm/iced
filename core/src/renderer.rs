@@ -21,6 +21,30 @@ pub trait Renderer {
         outline: crate::border::Outline,
     );
 
+    /// Starts a layer clipped to a quad's contour after transforms and pixel snapping.
+    /// `inset` is measured from the outer contour in logical pixels.
+    fn start_border_layer(
+        &mut self,
+        bounds: Rectangle,
+        border: Border,
+        snap: bool,
+        inset: f32,
+    );
+
+    /// Draws child content through a quad's resolved contour.
+    fn with_border_layer(
+        &mut self,
+        bounds: Rectangle,
+        border: Border,
+        snap: bool,
+        inset: f32,
+        f: impl FnOnce(&mut Self),
+    ) {
+        self.start_border_layer(bounds, border, snap, inset);
+        f(self);
+        self.end_layer();
+    }
+
     /// Draws child content through a reference contour, including its inset.
     fn with_shaped_layer(
         &mut self,

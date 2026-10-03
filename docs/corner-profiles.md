@@ -40,7 +40,12 @@ A rounded background does not clip its children. Clipping is explicit:
 
 - `Container::clip_to_border(true)` clips children to the border's inner contour.
 - `Container::clip_outline(outline)` uses the supplied reference contour.
-- `Renderer::with_shaped_layer(bounds, outline, draw)` masks a content group.
+- `Renderer::with_shaped_layer(bounds, outline, draw)` masks a reference contour.
+- `Renderer::with_border_layer(bounds, border, snap, inset, draw)` resolves a local
+  contour after transforms and pixel snapping.
+
+Automatic border clips use the same snapped bounds and requested radii as the
+background. Explicit reference outlines retain their original geometry.
 
 The container background and border are drawn outside the child group. Shaped
 clipping does not apply to separate overlays. Ordinary rectangular layers keep

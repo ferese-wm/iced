@@ -380,21 +380,17 @@ where
         if let Some(clipped_viewport) = bounds.intersection(viewport) {
             draw_background(renderer, &style, bounds);
 
-            let outline = self.shaped_clip.and_then(|reference| {
-                reference.or_else(|| {
-                    style
-                        .border
-                        .outline_for(bounds)?
-                        .inset(style.border.width.max(0.0) as f64)
-                })
-            });
-
-            if self.shaped_clip.is_some() && outline.is_none() {
-                return;
-            }
-
-            if let Some(outline) = outline {
-                renderer.start_shaped_layer(bounds, outline);
+            if let Some(reference) = self.shaped_clip {
+                if let Some(outline) = reference {
+                    renderer.start_shaped_layer(bounds, outline);
+                } else {
+                    renderer.start_border_layer(
+                        bounds,
+                        style.border,
+                        style.snap,
+                        style.border.width.max(0.0),
+                    );
+                }
             }
 
             self.content.as_widget().draw(
@@ -423,7 +419,7 @@ where
                 },
             );
 
-            if outline.is_some() {
+            if self.shaped_clip.is_some() {
                 renderer.end_layer();
             }
         }

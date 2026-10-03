@@ -210,6 +210,7 @@ mod tests {
         let clip = ShapedClip {
             id: 0,
             outline: Some(outline),
+            local_border: None,
             bounds: Rectangle::INFINITE,
         };
         let first = pipeline.mask(std::slice::from_ref(&clip), size, 1.0);

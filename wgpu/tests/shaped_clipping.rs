@@ -16,6 +16,7 @@ fn gpu_masks_entire_groups_and_preserves_painter_order() {
         .unwrap();
         check(&mut renderer);
         check_insets_and_shape_changes(&mut renderer);
+        check_border_clips_follow_snapped_background(&mut renderer);
         #[cfg(all(feature = "image", feature = "geometry"))]
         check_child_primitives(&mut renderer);
     });
@@ -27,6 +28,7 @@ fn software_masks_entire_groups_and_preserves_painter_order() {
         iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
     check(&mut renderer);
     check_insets_and_shape_changes(&mut renderer);
+    check_border_clips_follow_snapped_background(&mut renderer);
     #[cfg(all(feature = "image", feature = "geometry"))]
     check_child_primitives(&mut renderer);
 }
@@ -295,6 +297,116 @@ where
                         (expected - actual).abs() <= 2.0 / 255.0,
                         "primitive={primitive} scale={scale} ({x},{y}): {actual} vs {expected}"
                     );
+                }
+            }
+        }
+    }
+}
+
+fn check_border_clips_follow_snapped_background(
+    renderer: &mut (impl Renderer + Headless),
+) {
+    use iced_wgpu::core::{Border, Transformation};
+    let screen = Rectangle::with_size(Size::new(60.0, 60.0));
+    let bounds = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 26.0,
+        height: 26.0,
+    };
+    let reference =
+        Outline::new([0.25, 0.75, 27.0, 28.0], [13.0; 4], Shape::Continuous)
+            .unwrap();
+    for scale in [1.0f32, 1.25, 1.5] {
+        for transform in [
+            Transformation::IDENTITY,
+            Transformation::translate(2.25, 3.5) * Transformation::scale(0.9),
+        ] {
+            for outline in [None, Some(reference)] {
+                for (snap, inset) in
+                    [(false, 0.0), (true, 0.0), (true, 1.0), (true, 4.0)]
+                {
+                    let border = Border {
+                        radius: 14.0.into(),
+                        width: inset,
+                        color: Color::TRANSPARENT,
+                        shape: Shape::Continuous,
+                        outline,
+                        ..Default::default()
+                    };
+                    let size =
+                        Size::new((60.0 * scale) as u32, (60.0 * scale) as u32);
+                    renderer.reset(screen);
+                    renderer.with_transformation(transform, |renderer| {
+                        renderer.fill_quad(
+                            Quad {
+                                bounds,
+                                border,
+                                snap,
+                                ..Default::default()
+                            },
+                            Color::WHITE,
+                        );
+                    });
+                    let background = Headless::screenshot(
+                        renderer,
+                        size,
+                        scale,
+                        Color::TRANSPARENT,
+                    );
+                    renderer.reset(screen);
+                    renderer.with_transformation(transform, |renderer| {
+                        renderer.with_border_layer(
+                            bounds,
+                            border,
+                            snap,
+                            inset,
+                            |renderer| {
+                                renderer.fill_quad(
+                                    Quad {
+                                        bounds: screen.expand(10.0),
+                                        snap: false,
+                                        ..Default::default()
+                                    },
+                                    Color::WHITE,
+                                );
+                            },
+                        );
+                    });
+                    let child = Headless::screenshot(
+                        renderer,
+                        size,
+                        scale,
+                        Color::TRANSPARENT,
+                    );
+                    for (i, (bg, clip)) in background
+                        .chunks_exact(4)
+                        .zip(child.chunks_exact(4))
+                        .enumerate()
+                    {
+                        // Explicit references are restricted by the quad's own rectangle.
+                        // Compare inside it, clear of the independent coarse clipping edge.
+                        if outline.is_some() {
+                            let p = (
+                                (i as u32 % size.width) as f32 + 0.5,
+                                (i as u32 / size.width) as f32 + 0.5,
+                            );
+                            let b = (bounds * transform) * scale;
+                            if p.0 < b.x + 1.0
+                                || p.1 < b.y + 1.0
+                                || p.0 > b.x + b.width - 1.0
+                                || p.1 > b.y + b.height - 1.0
+                            {
+                                continue;
+                            }
+                        }
+                        assert!(
+                            bg[3].abs_diff(clip[3]) <= 2,
+                            "scale={scale} transform={transform:?} outline={outline:?} snap={snap} inset={inset} pixel={i}: background={} child={}",
+                            bg[3],
+                            clip[3]
+                        );
+                    }
                 }
             }
         }

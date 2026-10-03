@@ -263,6 +263,16 @@ impl core::Renderer for Renderer {
         self.layers.push_shaped_clip(bounds, outline);
     }
 
+    fn start_border_layer(
+        &mut self,
+        bounds: Rectangle,
+        border: core::Border,
+        snap: bool,
+        inset: f32,
+    ) {
+        self.layers.push_border_clip(bounds, border, snap, inset);
+    }
+
     fn end_layer(&mut self) {
         self.layers.pop_clip();
     }
