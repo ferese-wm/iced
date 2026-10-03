@@ -29,7 +29,8 @@ impl Layer {
         background: Background,
         transformation: Transformation,
     ) {
-        if quad.border.shape == core::border::Shape::Continuous
+        if quad.use_contour
+            || quad.border.shape == core::border::Shape::Continuous
             || quad.border.outline.is_some()
         {
             let scale = transformation.scale_factor();
@@ -268,8 +269,8 @@ impl Layer {
             &previous.quads,
             &current.quads,
             |(quad, _)| {
-                let shadow = quad.border.shape
-                    == core::border::Shape::Continuous
+                let shadow = quad.use_contour
+                    || quad.border.shape == core::border::Shape::Continuous
                     || quad.border.outline.is_some();
                 let bounds = if shadow && quad.shadow.color.a > 0.0 {
                     Rectangle {
@@ -495,5 +496,71 @@ impl<T> Item<T> {
             Item::Group(group, _, _) => group.as_slice(),
             Item::Cached(cache, _, _) => cache,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Border, Shadow};
+    use crate::graphics::layer::Layer as _;
+
+    #[test]
+    fn clipped_circular_quads_scale_contours_and_damage_their_shadows() {
+        let screen = Rectangle::with_size((100.0, 100.0).into());
+        let transform =
+            Transformation::translate(2.25, 3.5) * Transformation::scale(0.9);
+        let quad = Quad {
+            bounds: Rectangle {
+                x: 20.0,
+                y: 20.0,
+                width: 26.0,
+                height: 26.0,
+            },
+            border: Border {
+                radius: 14.0.into(),
+                width: 1.0,
+                ..Default::default()
+            },
+            shadow: Shadow {
+                color: Color::BLACK,
+                offset: [2.0, 3.0].into(),
+                blur_radius: 6.0,
+            },
+            use_contour: true,
+            ..Default::default()
+        };
+        let mut before = Layer::with_bounds(screen);
+        before.draw_quad(quad, Color::WHITE.into(), transform);
+        let recorded = before.quads[0].0;
+        assert!((recorded.border.width - 0.9).abs() < 1e-6);
+        assert!((recorded.border.radius.top_left - 12.6).abs() < 1e-6);
+        assert!((recorded.shadow.blur_radius - 5.4).abs() < 1e-6);
+        let mut after = Layer::with_bounds(screen);
+        after.draw_quad(quad, Color::BLACK.into(), transform);
+        let shadow_point = Point::new(
+            recorded.bounds.x
+                + recorded.bounds.width
+                + recorded.shadow.offset.x
+                + 2.0,
+            recorded.bounds.center().y,
+        );
+        assert!(
+            Layer::damage(&before, &after)
+                .iter()
+                .any(|rect| rect.contains(shadow_point))
+        );
+
+        let mut legacy = Layer::with_bounds(screen);
+        legacy.draw_quad(
+            Quad {
+                use_contour: false,
+                ..quad
+            },
+            Color::WHITE.into(),
+            transform,
+        );
+        assert_eq!(legacy.quads[0].0.border.width, 1.0);
+        assert_eq!(legacy.quads[0].0.shadow.blur_radius, 6.0);
     }
 }

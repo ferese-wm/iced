@@ -46,6 +46,9 @@ A rounded background does not clip its children. Clipping is explicit:
 
 Automatic border clips use the same snapped bounds and requested radii as the
 background. Explicit reference outlines retain their original geometry.
+Containers with shaped clipping use the shared contour path for circular
+backgrounds too. When drawing a matching circular background directly, set
+`Quad::use_contour` to `true`; ordinary circular quads retain their legacy path.
 
 The container background and border are drawn outside the child group. Shaped
 clipping does not apply to separate overlays. Ordinary rectangular layers keep

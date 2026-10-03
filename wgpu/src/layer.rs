@@ -72,7 +72,9 @@ impl Layer {
 
         let contour = if quad.border.outline.is_some() {
             2
-        } else if quad.border.shape == core::border::Shape::Continuous {
+        } else if quad.use_contour
+            || quad.border.shape == core::border::Shape::Continuous
+        {
             1
         } else {
             0

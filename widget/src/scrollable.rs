@@ -1849,6 +1849,7 @@ where
                     border: style.border,
                     shadow: style.shadow,
                     snap: false,
+                    use_contour: false,
                 },
                 style.background,
             );

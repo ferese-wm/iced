@@ -92,6 +92,7 @@ fn check_quads(renderer: &mut (impl Renderer + Headless)) {
                                 blur_radius: 3.0,
                             },
                             snap,
+                            use_contour: false,
                         };
                         let fill = Color::from_rgba(1.0, 1.0, 1.0, 0.65);
                         let background = if gradient {

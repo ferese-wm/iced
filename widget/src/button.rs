@@ -505,6 +505,7 @@ where
                     border: style.border,
                     shadow: style.shadow,
                     snap: style.snap,
+                    use_contour: false,
                 },
                 style
                     .background

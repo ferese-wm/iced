@@ -132,6 +132,11 @@ pub struct Quad {
 
     /// Whether the [`Quad`] should be snapped to the pixel grid.
     pub snap: bool,
+
+    /// Uses the shared signed-distance contour for circular corners too.
+    /// Enable when pairing the quad with shaped border clipping.
+    /// Otherwise ordinary circular quads retain their legacy rendering path.
+    pub use_contour: bool,
 }
 
 impl Default for Quad {
@@ -141,6 +146,7 @@ impl Default for Quad {
             border: Border::default(),
             shadow: Shadow::default(),
             snap: cfg!(feature = "crisp"),
+            use_contour: false,
         }
     }
 }

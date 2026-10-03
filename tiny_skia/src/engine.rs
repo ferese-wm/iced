@@ -41,7 +41,8 @@ impl Engine {
         clip_mask: &mut tiny_skia::Mask,
         clip_bounds: Rectangle,
     ) {
-        if quad.border.shape == crate::core::border::Shape::Continuous
+        if quad.use_contour
+            || quad.border.shape == crate::core::border::Shape::Continuous
             || quad.border.outline.is_some()
         {
             self.quad_pipeline.draw(

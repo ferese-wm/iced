@@ -378,7 +378,12 @@ where
         let style = theme.style(&self.class);
 
         if let Some(clipped_viewport) = bounds.intersection(viewport) {
-            draw_background(renderer, &style, bounds);
+            draw_background_with_contour(
+                renderer,
+                &style,
+                bounds,
+                self.shaped_clip.is_some(),
+            );
 
             if let Some(reference) = self.shaped_clip {
                 if let Some(outline) = reference {
@@ -539,6 +544,17 @@ pub fn draw_background<Renderer>(
 ) where
     Renderer: core::Renderer,
 {
+    draw_background_with_contour(renderer, style, bounds, false);
+}
+
+fn draw_background_with_contour<Renderer>(
+    renderer: &mut Renderer,
+    style: &Style,
+    bounds: Rectangle,
+    use_contour: bool,
+) where
+    Renderer: core::Renderer,
+{
     if style.background.is_some()
         || style.border.width > 0.0
         || style.shadow.color.a > 0.0
@@ -549,6 +565,7 @@ pub fn draw_background<Renderer>(
                 border: style.border,
                 shadow: style.shadow,
                 snap: style.snap,
+                use_contour,
             },
             style
                 .background

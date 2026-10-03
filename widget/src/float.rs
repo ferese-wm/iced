@@ -167,6 +167,7 @@ where
                         shadow: style.shadow,
                         border: border::rounded(style.shadow_border_radius),
                         snap: false,
+                        use_contour: false,
                     },
                     style.shadow.color,
                 );
@@ -350,6 +351,7 @@ where
                                     style.shadow_border_radius,
                                 ),
                                 snap: false,
+                                use_contour: false,
                             },
                             style.shadow.color,
                         );
