@@ -83,19 +83,23 @@ impl Pipeline {
             let shader =
                 device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("iced_wgpu.quad.gradient.shader"),
-                    source: wgpu::ShaderSource::Wgsl(
-                        std::borrow::Cow::Borrowed(concat!(
-                            include_str!("../shader/quad.wgsl"),
-                            "\n",
-                            include_str!("../shader/vertex.wgsl"),
-                            "\n",
-                            include_str!("../shader/quad/gradient.wgsl"),
-                            "\n",
-                            include_str!("../shader/color.wgsl"),
-                            "\n",
-                            include_str!("../shader/color/linear_rgb.wgsl")
-                        )),
-                    ),
+                    source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(
+                        [
+                            crate::core::shape::WGSL,
+                            concat!(
+                                include_str!("../shader/quad.wgsl"),
+                                "\n",
+                                include_str!("../shader/vertex.wgsl"),
+                                "\n",
+                                include_str!("../shader/quad/gradient.wgsl"),
+                                "\n",
+                                include_str!("../shader/color.wgsl"),
+                                "\n",
+                                include_str!("../shader/color/linear_rgb.wgsl")
+                            ),
+                        ]
+                        .join("\n"),
+                    )),
                 });
 
             let pipeline = device.create_render_pipeline(
@@ -109,30 +113,7 @@ impl Pipeline {
                             array_stride: std::mem::size_of::<Gradient>()
                                 as u64,
                             step_mode: wgpu::VertexStepMode::Instance,
-                            attributes: &wgpu::vertex_attr_array!(
-                                // Colors 1-2
-                                0 => Uint32x4,
-                                // Colors 3-4
-                                1 => Uint32x4,
-                                // Colors 5-6
-                                2 => Uint32x4,
-                                // Colors 7-8
-                                3 => Uint32x4,
-                                // Offsets 1-8
-                                4 => Uint32x4,
-                                // Direction
-                                5 => Float32x4,
-                                // Position & Scale
-                                6 => Float32x4,
-                                // Border color
-                                7 => Float32x4,
-                                // Border radius
-                                8 => Float32x4,
-                                // Border width
-                                9 => Float32,
-                                // Snap
-                                10 => Uint32,
-                            ),
+                            attributes: &attributes(),
                         }],
                         compilation_options:
                             wgpu::PipelineCompilationOptions::default(),
@@ -183,5 +164,56 @@ impl Pipeline {
 
             render_pass.draw(0..6, range.start as u32..range.end as u32);
         }
+    }
+}
+
+fn attributes() -> [wgpu::VertexAttribute; 16] {
+    let mut attributes = wgpu::vertex_attr_array!(
+        0 => Uint32x4, 1 => Uint32x4, 2 => Uint32x4, 3 => Uint32x4,
+        4 => Uint32x4, 5 => Float32x4, 6 => Float32x4,
+        7 => Float32x4, 8 => Float32x4, 9 => Float32,
+        10 => Uint32, 11 => Float32x4, 12 => Float32x3,
+        13 => Float32x4, 14 => Float32, 15 => Uint32x2
+    );
+    let quad = std::mem::offset_of!(Gradient, quad) as u64;
+
+    for (location, offset) in [
+        (6, std::mem::offset_of!(Quad, position)),
+        (7, std::mem::offset_of!(Quad, border_color)),
+        (8, std::mem::offset_of!(Quad, border_radius)),
+        (9, std::mem::offset_of!(Quad, border_width)),
+        (10, std::mem::offset_of!(Quad, snap)),
+        (11, std::mem::offset_of!(Quad, shadow_color)),
+        (12, std::mem::offset_of!(Quad, shadow_offset)),
+        (13, std::mem::offset_of!(Quad, outline_bounds)),
+        (14, std::mem::offset_of!(Quad, outline_inset)),
+        (15, std::mem::offset_of!(Quad, shape)),
+    ] {
+        attributes[location].offset = quad + offset as u64;
+    }
+
+    attributes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gradient_attributes_skip_shadow_fields_when_reading_snap() {
+        let attributes = attributes();
+        let quad = std::mem::offset_of!(Gradient, quad) as u64;
+        assert_eq!(
+            attributes[10].offset,
+            quad + std::mem::offset_of!(Quad, snap) as u64
+        );
+        assert_eq!(
+            attributes[11].offset,
+            quad + std::mem::offset_of!(Quad, shadow_color) as u64
+        );
+        assert_eq!(
+            attributes[15].offset + 8,
+            std::mem::size_of::<Gradient>() as u64
+        );
     }
 }

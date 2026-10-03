@@ -44,6 +44,14 @@ pub struct Quad {
 
     /// Whether the [`Quad`] should be snapped to the pixel grid.
     pub snap: u32,
+
+    /// Bounds and inset of the reference contour in logical coordinates.
+    pub outline_bounds: [f32; 4],
+    pub outline_inset: f32,
+
+    /// Corner profile and contour mode (0: legacy, 1: local, 2: reference).
+    pub shape: u32,
+    pub contour: u32,
 }
 
 #[derive(Debug, Clone)]

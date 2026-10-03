@@ -11,6 +11,7 @@ use crate::text;
 #[derive(Debug)]
 pub struct Engine {
     text_pipeline: text::Pipeline,
+    quad_pipeline: crate::quad::Pipeline,
 
     #[cfg(feature = "image")]
     pub(crate) raster_pipeline: crate::raster::Pipeline,
@@ -22,6 +23,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             text_pipeline: text::Pipeline::new(),
+            quad_pipeline: crate::quad::Pipeline::default(),
             #[cfg(feature = "image")]
             raster_pipeline: crate::raster::Pipeline::new(),
             #[cfg(feature = "svg")]
@@ -38,6 +40,20 @@ impl Engine {
         clip_mask: &mut tiny_skia::Mask,
         clip_bounds: Rectangle,
     ) {
+        if quad.border.shape == crate::core::border::Shape::Continuous
+            || quad.border.outline.is_some()
+        {
+            self.quad_pipeline.draw(
+                quad,
+                background,
+                transformation,
+                pixels,
+                clip_mask,
+                clip_bounds,
+            );
+            return;
+        }
+
         let physical_bounds = quad.bounds * transformation;
 
         if !clip_bounds.intersects(&physical_bounds) {

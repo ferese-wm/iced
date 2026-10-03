@@ -46,20 +46,60 @@ impl Layer {
         transformation: Transformation,
     ) {
         let bounds = quad.bounds * transformation;
+        let scale = transformation.scale_factor();
+        let translation = transformation.translation();
+        let Some(outline) =
+            quad.border.outline_for(quad.bounds).and_then(|outline| {
+                outline.transformed(
+                    [f64::from(translation.x), f64::from(translation.y)],
+                    f64::from(scale),
+                )
+            })
+        else {
+            return;
+        };
+        let outline_bounds = outline.bounds().map(|v| v as f32);
+        let outline_inset = outline.inset_distance() as f32;
+
+        if !outline_bounds
+            .into_iter()
+            .chain([outline_inset])
+            .all(f32::is_finite)
+        {
+            return;
+        }
+
+        let contour = if quad.border.outline.is_some() {
+            2
+        } else if quad.border.shape == core::border::Shape::Continuous {
+            1
+        } else {
+            0
+        };
 
         let quad = Quad {
             position: [bounds.x, bounds.y],
             size: [bounds.width, bounds.height],
             border_color: color::pack(quad.border.color),
-            border_radius: (quad.border.radius * transformation.scale_factor())
-                .into(),
-            border_width: quad.border.width * transformation.scale_factor(),
+            border_radius: outline.radii().map(|v| v as f32),
+            border_width: if contour == 0 {
+                quad.border.width * scale
+            } else {
+                (quad.border.width * scale).max(0.0)
+            },
             shadow_color: color::pack(quad.shadow.color),
             shadow_offset: (quad.shadow.offset * transformation.scale_factor())
                 .into(),
-            shadow_blur_radius: quad.shadow.blur_radius
-                * transformation.scale_factor(),
+            shadow_blur_radius: if contour == 0 {
+                quad.shadow.blur_radius * scale
+            } else {
+                (quad.shadow.blur_radius * scale).max(0.0)
+            },
             snap: quad.snap as u32,
+            outline_bounds,
+            outline_inset,
+            shape: outline.shape() as u32,
+            contour,
         };
 
         self.quads.add(quad, &background);

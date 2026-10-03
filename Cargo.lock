@@ -3234,6 +3234,7 @@ dependencies = [
  "guillotiere",
  "iced_debug",
  "iced_graphics",
+ "iced_tiny_skia",
  "log",
  "lyon",
  "raw-window-handle",

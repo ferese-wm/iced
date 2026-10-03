@@ -1,0 +1,394 @@
+use crate::core::border::Shape;
+use crate::core::renderer::Quad;
+use crate::core::shape::{Outline, edge_coverage};
+use crate::core::{Background, Gradient, Rectangle, Transformation};
+use crate::engine::into_color;
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+const CACHE_BYTES: usize = 16 * 1024 * 1024;
+const CACHE_ENTRIES: usize = 32;
+
+#[derive(Debug, Clone, PartialEq)]
+struct Key {
+    outline: Outline,
+    bounds: [f64; 4],
+    size: [u32; 2],
+    width: f64,
+    shadow_offset: [f64; 2],
+    blur: f64,
+    shadow: bool,
+}
+
+#[derive(Debug)]
+struct Masks {
+    key: Key,
+    coverage: Vec<[u8; 3]>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Pipeline {
+    cache: VecDeque<Arc<Masks>>,
+    bytes: usize,
+}
+
+impl Pipeline {
+    pub(crate) fn draw(
+        &mut self,
+        quad: &Quad,
+        background: &Background,
+        transformation: Transformation,
+        pixels: &mut tiny_skia::PixmapMut<'_>,
+        clip_mask: &tiny_skia::Mask,
+        clip_bounds: Rectangle,
+    ) {
+        let scale = transformation.scale_factor();
+        let translation = transformation.translation();
+        let mut bounds = quad.bounds * transformation;
+        let Some(mut outline) =
+            quad.border.outline_for(quad.bounds).and_then(|o| {
+                o.transformed(
+                    [translation.x as f64, translation.y as f64],
+                    scale as f64,
+                )
+            })
+        else {
+            return;
+        };
+
+        if quad.snap {
+            let position =
+                [(bounds.x + 0.001).round(), (bounds.y + 0.001).round()];
+            let right = (bounds.x + bounds.width + 0.001).round();
+            let bottom = (bounds.y + bounds.height + 0.001).round();
+            bounds = Rectangle {
+                x: position[0],
+                y: position[1],
+                width: right - position[0],
+                height: bottom - position[1],
+            };
+
+            if quad.border.outline.is_none() {
+                let Some(snapped) = Outline::new(
+                    [bounds.x, bounds.y, bounds.width, bounds.height]
+                        .map(f64::from),
+                    outline.radii(),
+                    outline.shape(),
+                ) else {
+                    return;
+                };
+                outline = snapped;
+            }
+        }
+
+        let shadow_offset = [
+            quad.shadow.offset.x as f64 * scale as f64,
+            quad.shadow.offset.y as f64 * scale as f64,
+        ];
+        let blur = f64::from((quad.shadow.blur_radius * scale).max(0.0));
+        let shadow = quad.shadow.color.a > 0.0;
+        let extent = if shadow { blur + 1.0 } else { 1.0 };
+        let offset = if shadow { shadow_offset } else { [0.0; 2] };
+        let left = (bounds.x as f64 + offset[0].min(0.0) - extent)
+            .floor()
+            .max(0.0) as u32;
+        let top = (bounds.y as f64 + offset[1].min(0.0) - extent)
+            .floor()
+            .max(0.0) as u32;
+        let right = (bounds.x as f64
+            + bounds.width as f64
+            + offset[0].max(0.0)
+            + extent)
+            .ceil()
+            .max(0.0)
+            .min(pixels.width() as f64) as u32;
+        let bottom = (bounds.y as f64
+            + bounds.height as f64
+            + offset[1].max(0.0)
+            + extent)
+            .ceil()
+            .max(0.0)
+            .min(pixels.height() as f64) as u32;
+
+        if left >= right || top >= bottom {
+            return;
+        }
+
+        let region = Rectangle {
+            x: left as f32,
+            y: top as f32,
+            width: (right - left) as f32,
+            height: (bottom - top) as f32,
+        };
+
+        if !region.intersects(&clip_bounds) {
+            return;
+        }
+
+        let Some(outline) =
+            outline.transformed([-(left as f64), -(top as f64)], 1.0)
+        else {
+            return;
+        };
+        let key = Key {
+            outline,
+            bounds: [
+                bounds.x as f64 - left as f64,
+                bounds.y as f64 - top as f64,
+                bounds.width as f64,
+                bounds.height as f64,
+            ],
+            size: [right - left, bottom - top],
+            width: f64::from((quad.border.width * scale).max(0.0)),
+            shadow_offset,
+            blur,
+            shadow,
+        };
+        let masks = self.masks(key);
+        let Some(mut fill) = tiny_skia::Pixmap::new(right - left, bottom - top)
+        else {
+            return;
+        };
+        let transform = tiny_skia::Transform::from_row(
+            scale,
+            0.0,
+            0.0,
+            scale,
+            translation.x - left as f32,
+            translation.y - top as f32,
+        );
+        let shader = match background {
+            Background::Color(color) => {
+                tiny_skia::Shader::SolidColor(into_color(*color))
+            }
+            Background::Gradient(Gradient::Linear(linear)) => {
+                let (start, end) = linear.angle.to_distance(&quad.bounds);
+                let mut stops = linear
+                    .stops
+                    .into_iter()
+                    .flatten()
+                    .map(|stop| {
+                        tiny_skia::GradientStop::new(
+                            stop.offset,
+                            into_color(stop.color),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                if stops.is_empty() {
+                    stops.push(tiny_skia::GradientStop::new(
+                        0.0,
+                        tiny_skia::Color::BLACK,
+                    ));
+                }
+
+                let Some(shader) = tiny_skia::LinearGradient::new(
+                    tiny_skia::Point::from_xy(start.x, start.y),
+                    tiny_skia::Point::from_xy(end.x, end.y),
+                    stops,
+                    tiny_skia::SpreadMode::Pad,
+                    transform,
+                ) else {
+                    return;
+                };
+                shader
+            }
+        };
+        fill.fill_rect(
+            tiny_skia::Rect::from_xywh(
+                0.0,
+                0.0,
+                fill.width() as f32,
+                fill.height() as f32,
+            )
+            .expect("valid region"),
+            &tiny_skia::Paint {
+                shader,
+                anti_alias: false,
+                ..Default::default()
+            },
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        let border = into_color(quad.border.color).to_color_u8().premultiply();
+        let shadow_color =
+            into_color(quad.shadow.color).to_color_u8().premultiply();
+        let border =
+            [border.red(), border.green(), border.blue(), border.alpha()];
+        let shadow_color = [
+            shadow_color.red(),
+            shadow_color.green(),
+            shadow_color.blue(),
+            shadow_color.alpha(),
+        ];
+
+        for (pixel, [outer, inner, shadow]) in
+            fill.data_mut().chunks_exact_mut(4).zip(&masks.coverage)
+        {
+            let band = f32::from(outer.saturating_sub(*inner)) / 255.0;
+            let inner = f32::from(*inner) / 255.0;
+            let shadow =
+                f32::from(*shadow) / 255.0 * (1.0 - f32::from(*outer) / 255.0);
+
+            for channel in 0..4 {
+                pixel[channel] = (f32::from(pixel[channel]) * inner
+                    + f32::from(border[channel]) * band
+                    + f32::from(shadow_color[channel]) * shadow)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        pixels.draw_pixmap(
+            left as i32,
+            top as i32,
+            fill.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            Some(clip_mask),
+        );
+    }
+
+    fn masks(&mut self, key: Key) -> Arc<Masks> {
+        if let Some(index) =
+            self.cache.iter().position(|entry| entry.key == key)
+        {
+            let entry = self.cache.remove(index).expect("cached mask");
+            self.cache.push_front(entry.clone());
+            return entry;
+        }
+
+        let mut coverage =
+            Vec::with_capacity(key.size[0] as usize * key.size[1] as usize);
+        let bounds = Outline::new(key.bounds, [0.0; 4], Shape::Circular)
+            .expect("valid quad bounds");
+
+        for y in 0..key.size[1] {
+            for x in 0..key.size[0] {
+                let point = [x as f64 + 0.5, y as f64 + 0.5];
+                let distance = bounds
+                    .signed_distance(point)
+                    .max(key.outline.signed_distance(point));
+                let outer = edge_coverage(distance);
+                let inner = edge_coverage(distance + key.width);
+                let shadow = if key.shadow {
+                    let point = [
+                        point[0] - key.shadow_offset[0],
+                        point[1] - key.shadow_offset[1],
+                    ];
+                    let distance = bounds
+                        .signed_distance(point)
+                        .max(key.outline.signed_distance(point));
+
+                    if key.blur > 0.0 {
+                        let t = ((distance.max(0.0) + key.blur)
+                            / (2.0 * key.blur))
+                            .clamp(0.0, 1.0);
+                        1.0 - t * t * (3.0 - 2.0 * t)
+                    } else {
+                        edge_coverage(distance)
+                    }
+                } else {
+                    0.0
+                };
+                coverage.push(
+                    [outer, inner, shadow].map(|v| (v * 255.0).round() as u8),
+                );
+            }
+        }
+
+        let entry = Arc::new(Masks { key, coverage });
+        let bytes = entry.coverage.len() * 3;
+
+        if bytes <= CACHE_BYTES {
+            while self.bytes + bytes > CACHE_BYTES
+                || self.cache.len() >= CACHE_ENTRIES
+            {
+                let removed = self.cache.pop_back().expect("mask cache budget");
+                self.bytes -= removed.coverage.len() * 3;
+            }
+
+            self.bytes += bytes;
+            self.cache.push_front(entry.clone());
+        }
+
+        entry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key() -> Key {
+        Key {
+            outline: Outline::new(
+                [1.25, 2.5, 56.0, 44.0],
+                [8.25; 4],
+                Shape::Continuous,
+            )
+            .unwrap(),
+            bounds: [1.25, 2.5, 56.0, 44.0],
+            size: [60, 50],
+            width: 0.75,
+            shadow_offset: [2.25, 3.5],
+            blur: 3.0,
+            shadow: true,
+        }
+    }
+
+    #[test]
+    fn stable_contours_reuse_masks_and_profile_changes_invalidate_them() {
+        let mut pipeline = Pipeline::default();
+        let key = key();
+        let first = pipeline.masks(key.clone());
+        let second = pipeline.masks(key.clone());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(pipeline.bytes, 60 * 50 * 3);
+        let circular = Key {
+            outline: Outline::new(
+                key.outline.bounds(),
+                key.outline.radii(),
+                Shape::Circular,
+            )
+            .unwrap(),
+            ..key
+        };
+        let third = pipeline.masks(circular);
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_ne!(first.coverage, third.coverage);
+    }
+
+    #[test]
+    fn inset_is_measured_from_the_original_contour_and_can_remove_the_fill() {
+        let mut pipeline = Pipeline::default();
+        let key = key();
+        let inset = key.outline.inset(30.0).unwrap();
+        let masks = pipeline.masks(Key {
+            outline: inset,
+            ..key
+        });
+        assert!(
+            masks
+                .coverage
+                .iter()
+                .all(|sample| sample[0] == 0 && sample[1] == 0)
+        );
+    }
+
+    #[test]
+    fn cache_has_an_entry_limit() {
+        let mut pipeline = Pipeline::default();
+
+        for width in 0..64 {
+            let _ = pipeline.masks(Key {
+                width: width as f64,
+                ..key()
+            });
+        }
+
+        assert_eq!(pipeline.cache.len(), CACHE_ENTRIES);
+        assert!(pipeline.bytes <= CACHE_BYTES);
+    }
+}

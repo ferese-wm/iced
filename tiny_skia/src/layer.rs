@@ -28,6 +28,27 @@ impl Layer {
         background: Background,
         transformation: Transformation,
     ) {
+        if quad.border.shape == core::border::Shape::Continuous
+            || quad.border.outline.is_some()
+        {
+            let scale = transformation.scale_factor();
+            let translation = transformation.translation();
+            if let Some(outline) = quad.border.outline {
+                let Some(outline) = outline.transformed(
+                    [translation.x as f64, translation.y as f64],
+                    scale as f64,
+                ) else {
+                    return;
+                };
+                quad.border.outline = Some(outline);
+            }
+
+            quad.border.width *= scale;
+            quad.border.radius = quad.border.radius * scale;
+            quad.shadow.offset = quad.shadow.offset * scale;
+            quad.shadow.blur_radius *= scale;
+        }
+
         quad.bounds = quad.bounds * transformation;
         self.quads.push((quad, background));
     }
@@ -227,7 +248,26 @@ impl Layer {
             &previous.quads,
             &current.quads,
             |(quad, _)| {
-                quad.bounds
+                let shadow = quad.border.shape
+                    == core::border::Shape::Continuous
+                    || quad.border.outline.is_some();
+                let bounds = if shadow && quad.shadow.color.a > 0.0 {
+                    Rectangle {
+                        x: quad.bounds.x + quad.shadow.offset.x.min(0.0)
+                            - quad.shadow.blur_radius,
+                        y: quad.bounds.y + quad.shadow.offset.y.min(0.0)
+                            - quad.shadow.blur_radius,
+                        width: quad.bounds.width
+                            + quad.shadow.offset.x.abs()
+                            + 2.0 * quad.shadow.blur_radius,
+                        height: quad.bounds.height
+                            + quad.shadow.offset.y.abs()
+                            + 2.0 * quad.shadow.blur_radius,
+                    }
+                } else {
+                    quad.bounds
+                };
+                bounds
                     .expand(1.0)
                     .intersection(&current.bounds)
                     .into_iter()

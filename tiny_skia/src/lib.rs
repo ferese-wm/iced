@@ -5,6 +5,7 @@ pub mod window;
 mod engine;
 mod layer;
 mod primitive;
+mod quad;
 mod settings;
 mod text;
 

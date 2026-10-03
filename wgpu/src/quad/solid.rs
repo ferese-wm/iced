@@ -72,16 +72,20 @@ impl Pipeline {
         let shader =
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("iced_wgpu.quad.solid.shader"),
-                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                    concat!(
-                        include_str!("../shader/color.wgsl"),
-                        "\n",
-                        include_str!("../shader/quad.wgsl"),
-                        "\n",
-                        include_str!("../shader/vertex.wgsl"),
-                        "\n",
-                        include_str!("../shader/quad/solid.wgsl"),
-                    ),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(
+                    [
+                        crate::core::shape::WGSL,
+                        concat!(
+                            include_str!("../shader/color.wgsl"),
+                            "\n",
+                            include_str!("../shader/quad.wgsl"),
+                            "\n",
+                            include_str!("../shader/vertex.wgsl"),
+                            "\n",
+                            include_str!("../shader/quad/solid.wgsl"),
+                        ),
+                    ]
+                    .join("\n"),
                 )),
             });
 
@@ -116,6 +120,10 @@ impl Pipeline {
                             8 => Float32,
                             // Snap
                             9 => Uint32,
+                            // Reference contour
+                            10 => Float32x4,
+                            11 => Float32,
+                            12 => Uint32x2,
                         ),
                     }],
                     compilation_options:

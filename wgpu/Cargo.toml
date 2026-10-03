@@ -69,3 +69,7 @@ x11rb = { version = "0.13.1", features = [
 
 [build-dependencies]
 build_helpers = { path = "../build_helpers" }
+
+[dev-dependencies]
+futures = { workspace = true, features = ["executor"] }
+iced_tiny_skia.workspace = true
