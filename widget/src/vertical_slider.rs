@@ -369,9 +369,8 @@ where
             | Event::Touch(touch::Event::FingerMoved { .. }) => {
                 if is_dragging {
                     let position = cursor.land().position();
-                    let outside = position.is_none_or(|position| {
-                        !viewport.contains(position)
-                    });
+                    let outside = position
+                        .is_none_or(|position| !viewport.contains(position));
 
                     if outside {
                         if let Some(on_release) = self.on_release.clone() {
@@ -521,6 +520,7 @@ where
                     radius: handle_border_radius,
                     width: style.handle.border_width,
                     color: style.handle.border_color,
+                    ..Default::default()
                 },
                 ..renderer::Quad::default()
             },

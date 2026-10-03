@@ -837,6 +837,7 @@ fn styled(
             radius: 2.0.into(),
             width: 1.0,
             color: border,
+            ..Default::default()
         },
         text_color: None,
     }

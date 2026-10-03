@@ -89,6 +89,7 @@ pub use vector::Vector;
 pub use widget::Widget;
 
 pub use bytes::Bytes;
+pub use ferese_shape as shape;
 pub use smol_str::SmolStr;
 pub use std::convert::Infallible as Never;
 

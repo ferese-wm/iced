@@ -1,7 +1,7 @@
 //! Draw lines around containers.
 pub use ferese_shape::{Outline, Shape};
 
-use crate::{Color, Pixels};
+use crate::{Color, Pixels, Rectangle};
 
 /// A border.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -14,6 +14,13 @@ pub struct Border {
 
     /// The [`Radius`] of the border.
     pub radius: Radius,
+
+    /// The corner profile, independent of its radii.
+    pub shape: Shape,
+
+    /// A reference outline for explicitly concentric surfaces.
+    /// Coordinates are in the same space as the renderer's quad bounds.
+    pub outline: Option<Outline>,
 }
 
 /// Creates a new [`Border`] with the given [`Radius`].
@@ -52,6 +59,36 @@ pub fn width(width: impl Into<Pixels>) -> Border {
 }
 
 impl Border {
+    /// Selects a profile and clears any reference outline.
+    pub fn shape(self, shape: Shape) -> Self {
+        Self {
+            shape,
+            outline: None,
+            ..self
+        }
+    }
+
+    /// Uses the original contour and accumulated inset of this outline.
+    pub fn outline(self, outline: Outline) -> Self {
+        Self {
+            shape: outline.shape(),
+            outline: Some(outline),
+            ..self
+        }
+    }
+
+    /// Resolves a reference outline or constructs an independent contour.
+    pub fn outline_for(self, bounds: Rectangle) -> Option<Outline> {
+        self.outline.or_else(|| {
+            Outline::new(
+                [bounds.x, bounds.y, bounds.width, bounds.height]
+                    .map(f64::from),
+                <[f32; 4]>::from(self.radius).map(f64::from),
+                self.shape,
+            )
+        })
+    }
+
     /// Sets the [`Color`] of the [`Border`].
     pub fn color(self, color: impl Into<Color>) -> Self {
         Self {
@@ -327,5 +364,62 @@ impl From<[u16; 4]> for Radius {
             bottom_right: f32::from(value[2]),
             bottom_left: f32::from(value[3]),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_keeps_circular_geometry() {
+        let border = Border::default().rounded(12);
+        assert_eq!(border.shape, Shape::Circular);
+        assert!(border.outline.is_none());
+        let bounds = Rectangle {
+            x: 2.5,
+            y: 4.0,
+            width: 80.0,
+            height: 40.0,
+        };
+        let outline = border.outline_for(bounds).unwrap();
+        assert_eq!(outline.bounds(), [2.5, 4.0, 80.0, 40.0]);
+        assert_eq!(outline.radii(), [12.0; 4]);
+    }
+
+    #[test]
+    fn concentric_child_retains_the_reference_contour() {
+        let parent = Border::default().rounded(12).shape(Shape::Continuous);
+        let bounds = Rectangle {
+            x: 2.5,
+            y: 4.0,
+            width: 80.0,
+            height: 40.0,
+        };
+        let outline = parent.outline_for(bounds).unwrap();
+        let child = Border::default().outline(outline.inset(4.0).unwrap());
+        let child_bounds = Rectangle {
+            x: 6.5,
+            y: 8.0,
+            width: 72.0,
+            height: 32.0,
+        };
+        let inner = child.outline_for(child_bounds).unwrap();
+        assert_eq!(inner.bounds(), outline.bounds());
+        assert_eq!(inner.radii(), outline.radii());
+        assert_eq!(inner.inset_distance(), 4.0);
+        assert_eq!(child.shape, Shape::Continuous);
+    }
+
+    #[test]
+    fn changing_profile_explicitly_discards_a_reference_inset() {
+        let outline =
+            Outline::new([0.0, 0.0, 80.0, 40.0], [12.0; 4], Shape::Continuous)
+                .unwrap();
+        let border = Border::default()
+            .outline(outline.inset(4.0).unwrap())
+            .shape(Shape::Circular);
+        assert_eq!(border.shape, Shape::Circular);
+        assert!(border.outline.is_none());
     }
 }

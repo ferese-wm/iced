@@ -209,7 +209,7 @@ keywords = ["gui", "ui", "graphics", "interface", "widgets"]
 rust-version = "1.92"
 
 [workspace.dependencies]
-ferese-shape = { git = "https://github.com/ferese-wm/ferese-shape", rev = "cd289800c93ec578eb48d85087ae73db27cd5304" }
+ferese-shape = { git = "https://github.com/ferese-wm/ferese-shape", rev = "df93da8" }
 iced = { version = "0.14.0", path = "." }
 iced_beacon = { version = "0.14.0", path = "beacon" }
 iced_core = { version = "0.14.0", path = "core" }
