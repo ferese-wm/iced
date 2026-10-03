@@ -1,6 +1,8 @@
 use crate::core::border::Shape;
 use crate::core::renderer::Quad;
-use crate::core::shape::{Outline, corner_extent, edge_coverage};
+use crate::core::shape::{
+    Outline, blend, controls, corner_extent, edge_coverage,
+};
 use crate::core::{Background, Gradient, Rectangle, Transformation};
 use crate::engine::into_color;
 
@@ -87,6 +89,36 @@ impl Pipeline {
                 };
                 outline = snapped;
             }
+        }
+
+        if quad.border.outline.is_none()
+            && outline.radii() == [0.0; 4]
+            && quad.border.width <= 0.0
+            && quad.shadow.color.a <= 0.0
+            && [bounds.x, bounds.y, bounds.width, bounds.height]
+                .into_iter()
+                .all(|v| v.fract() == 0.0)
+            && let Background::Color(color) = background
+            && let Some(rect) = tiny_skia::Rect::from_xywh(
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+            )
+        {
+            // Aligned straight edges have binary coverage. Draw the solid
+            // rectangle directly instead of constructing an intermediate mask.
+            pixels.fill_rect(
+                rect,
+                &tiny_skia::Paint {
+                    shader: tiny_skia::Shader::SolidColor(into_color(*color)),
+                    anti_alias: false,
+                    ..Default::default()
+                },
+                tiny_skia::Transform::identity(),
+                Some(clip_mask),
+            );
+            return;
         }
 
         let shadow_offset = [
@@ -299,6 +331,47 @@ impl Pipeline {
             .map(|radius| corner_extent(radius, limit, key.outline.shape()))
             .fold(0.0f64, f64::max);
         let margin = (key.width + 0.5 + key.outline.inset_distance()).max(0.0);
+        let mut interior_planes = Vec::with_capacity(12);
+
+        for (index, radius) in key.outline.radii().into_iter().enumerate() {
+            if radius == 0.0 {
+                continue;
+            }
+
+            let curves =
+                if key.outline.shape() == Shape::Circular || radius >= limit {
+                    crate::core::shape::CIRCULAR_BLEND
+                } else {
+                    controls(blend(radius, limit))
+                };
+            let (sx, sy, ox, oy) = match index {
+                0 => (1.0, 1.0, left, top),
+                1 => (-1.0, 1.0, left + width, top),
+                2 => (-1.0, -1.0, left + width, top + height),
+                _ => (1.0, -1.0, left, top + height),
+            };
+
+            for curve in curves {
+                let normal =
+                    [curve[0][1] - curve[3][1], curve[3][0] - curve[0][0]];
+                let length = normal[0].hypot(normal[1]);
+                let normal = normal.map(|v| v / length);
+                // A Bézier lies inside the convex hull of its controls. Being
+                // inward of every control plane keeps a disc clear of the
+                // entire boundary, without approximating edge coverage.
+                let offset = curve
+                    .into_iter()
+                    .map(|p| normal[0] * p[0] + normal[1] * p[1])
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    * radius;
+                let normal = [normal[0] * sx, normal[1] * sy];
+                interior_planes.push([
+                    normal[0],
+                    normal[1],
+                    offset + normal[0] * ox + normal[1] * oy,
+                ]);
+            }
+        }
 
         for y in 0..key.size[1] {
             for x in 0..key.size[0] {
@@ -316,8 +389,11 @@ impl Pipeline {
                 // and the straight edges. It is wholly inside the reference
                 // contour, including the inset and border-width thresholds.
                 if edge[0].min(edge[1]) >= margin
-                    && edge[0].max(edge[1]) >= extent + margin
                     && clip_edge >= key.width + 0.5
+                    && (edge[0].max(edge[1]) >= extent + margin
+                        || interior_planes.iter().all(|[nx, ny, d]| {
+                            nx * point[0] + ny * point[1] - d >= margin
+                        }))
                 {
                     coverage.push([255, 255, 0]);
                     continue;

@@ -299,3 +299,58 @@ fn software_quad_regions_respect_hard_clipping() {
         }
     }
 }
+
+#[test]
+fn software_aligned_solid_rectangles_match_reference_masks() {
+    let mut renderer =
+        iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
+    let viewport = Rectangle::with_size(Size::new(90.0, 80.0));
+    let bounds = Rectangle {
+        x: 16.0,
+        y: 12.0,
+        width: 52.0,
+        height: 44.0,
+    };
+    let outline =
+        Outline::new([16.0, 12.0, 52.0, 44.0], [0.0; 4], Shape::Continuous)
+            .unwrap();
+
+    for scale in [1.0f32, 1.25, 1.5] {
+        for alpha in [0.0, 0.25, 0.5, 1.0] {
+            let size = Size::new((90.0 * scale) as u32, (80.0 * scale) as u32);
+            let background = Color::from_rgba(0.7, 0.3, 0.1, alpha);
+            let mut screenshots = Vec::new();
+
+            for reference in [false, true] {
+                renderer.reset(viewport);
+                let border = if reference {
+                    Border::default().outline(outline)
+                } else {
+                    Border::default().shape(Shape::Continuous)
+                };
+                renderer.fill_quad(
+                    Quad {
+                        bounds,
+                        border,
+                        snap: false,
+                        ..Default::default()
+                    },
+                    background,
+                );
+                screenshots.push(Headless::screenshot(
+                    &mut renderer,
+                    size,
+                    scale,
+                    Color::from_rgb(0.2, 0.3, 0.4),
+                ));
+            }
+
+            for (a, b) in screenshots[0].iter().zip(&screenshots[1]) {
+                assert!(
+                    a.abs_diff(*b) <= 1,
+                    "scale={scale} alpha={alpha}: fast={a} reference={b}"
+                );
+            }
+        }
+    }
+}
