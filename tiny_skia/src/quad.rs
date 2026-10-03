@@ -1,6 +1,6 @@
 use crate::core::border::Shape;
 use crate::core::renderer::Quad;
-use crate::core::shape::{Outline, edge_coverage};
+use crate::core::shape::{Outline, corner_extent, edge_coverage};
 use crate::core::{Background, Gradient, Rectangle, Transformation};
 use crate::engine::into_color;
 
@@ -226,6 +226,16 @@ impl Pipeline {
         for (pixel, [outer, inner, shadow]) in
             fill.data_mut().chunks_exact_mut(4).zip(&masks.coverage)
         {
+            if *outer == 255 && *inner == 255 {
+                // Filled interior pixels already have their final color.
+                continue;
+            }
+
+            if *outer == 0 && *shadow == 0 {
+                pixel.fill(0);
+                continue;
+            }
+
             let band = f32::from(outer.saturating_sub(*inner)) / 255.0;
             let inner = f32::from(*inner) / 255.0;
             let shadow =
@@ -264,15 +274,45 @@ impl Pipeline {
         let bounds = Outline::new(key.bounds, [0.0; 4], Shape::Circular)
             .expect("valid quad bounds");
 
+        let [left, top, width, height] = key.outline.bounds();
+        let limit = width.min(height) * 0.5;
+        let extent = key
+            .outline
+            .radii()
+            .into_iter()
+            .map(|radius| corner_extent(radius, limit, key.outline.shape()))
+            .fold(0.0f64, f64::max);
+        let margin = (key.width + 0.5 + key.outline.inset_distance()).max(0.0);
+
         for y in 0..key.size[1] {
             for x in 0..key.size[0] {
                 let point = [x as f64 + 0.5, y as f64 + 0.5];
+                let edge = [
+                    (point[0] - left).min(left + width - point[0]),
+                    (point[1] - top).min(top + height - point[1]),
+                ];
+                let [bx, by, bw, bh] = key.bounds;
+                let clip_edge = (point[0] - bx)
+                    .min(bx + bw - point[0])
+                    .min((point[1] - by).min(by + bh - point[1]));
+
+                // A disc of radius `margin` stays clear of every corner box
+                // and the straight edges. It is wholly inside the reference
+                // contour, including the inset and border-width thresholds.
+                if edge[0].min(edge[1]) >= margin
+                    && edge[0].max(edge[1]) >= extent + margin
+                    && clip_edge >= key.width + 0.5
+                {
+                    coverage.push([255, 255, 0]);
+                    continue;
+                }
+
                 let distance = bounds
                     .signed_distance(point)
                     .max(key.outline.signed_distance(point));
                 let outer = edge_coverage(distance);
                 let inner = edge_coverage(distance + key.width);
-                let shadow = if key.shadow {
+                let shadow = if key.shadow && outer < 1.0 {
                     let point = [
                         point[0] - key.shadow_offset[0],
                         point[1] - key.shadow_offset[1],
@@ -375,6 +415,58 @@ mod tests {
                 .iter()
                 .all(|sample| sample[0] == 0 && sample[1] == 0)
         );
+    }
+
+    #[test]
+    fn interior_shortcuts_match_full_distance_coverage() {
+        let mut pipeline = Pipeline::default();
+
+        for shape in [Shape::Circular, Shape::Continuous] {
+            for radii in [[0.0; 4], [8.25; 4], [0.0, 12.0, 3.5, 9.0], [22.0; 4]]
+            {
+                for inset in [-3.0, 0.0, 2.25, 30.0] {
+                    for width in [0.0, 0.75, 3.0, 24.0] {
+                        let key = Key {
+                            outline: Outline::new(
+                                [1.25, 2.5, 56.0, 44.0],
+                                radii,
+                                shape,
+                            )
+                            .unwrap()
+                            .inset(inset)
+                            .unwrap(),
+                            width,
+                            ..key()
+                        };
+                        let bounds =
+                            Outline::new(key.bounds, [0.0; 4], Shape::Circular)
+                                .unwrap();
+                        let masks = pipeline.masks(key.clone());
+
+                        for y in 0..key.size[1] {
+                            for x in 0..key.size[0] {
+                                let point = [x as f64 + 0.5, y as f64 + 0.5];
+                                let distance = bounds
+                                    .signed_distance(point)
+                                    .max(key.outline.signed_distance(point));
+                                let expected = [
+                                    edge_coverage(distance),
+                                    edge_coverage(distance + width),
+                                ]
+                                .map(|value| (value * 255.0).round() as u8);
+                                let actual = masks.coverage
+                                    [(y * key.size[0] + x) as usize];
+                                assert_eq!(
+                                    [actual[0], actual[1]],
+                                    expected,
+                                    "shape={shape:?} radii={radii:?} inset={inset} width={width} point={point:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
