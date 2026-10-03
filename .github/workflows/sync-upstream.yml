@@ -1,0 +1,45 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository_owner == 'ferese-wm'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_REPOSITORY: pop-os/iced
+    steps:
+      - name: Update the upstream tracking branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="$(gh api "repos/$UPSTREAM_REPOSITORY" --jq .default_branch)"
+          revision="$(gh api "repos/$UPSTREAM_REPOSITORY/git/ref/heads/$branch" --jq .object.sha)"
+
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --silent; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/heads/$branch" -f "sha=$revision" --silent
+          fi
+
+          ahead="$(gh api "repos/$GITHUB_REPOSITORY/compare/$revision...$branch" --jq .ahead_by)"
+          if [ "$ahead" != 0 ]; then
+            echo "The tracking branch contains local commits; refusing to overwrite them." >&2
+            exit 1
+          fi
+
+          gh api --method POST "repos/$GITHUB_REPOSITORY/merge-upstream" \
+            -f "branch=$branch"
+          printf 'Review upstream changes: https://github.com/%s/compare/ferese...%s\n' \
+            "$GITHUB_REPOSITORY" "$branch" >> "$GITHUB_STEP_SUMMARY"
