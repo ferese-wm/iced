@@ -1,4 +1,6 @@
 //! Draw lines around containers.
+pub use ferese_shape::{Outline, Shape};
+
 use crate::{Color, Pixels};
 
 /// A border.

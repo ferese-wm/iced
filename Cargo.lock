@@ -1961,6 +1961,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferese-shape"
+version = "0.1.0"
+source = "git+https://github.com/ferese-wm/ferese-shape?rev=cd289800c93ec578eb48d85087ae73db27cd5304#cd289800c93ec578eb48d85087ae73db27cd5304"
+
+[[package]]
 name = "ferris"
 version = "0.1.0"
 dependencies = [
@@ -3048,6 +3053,7 @@ dependencies = [
  "bytes",
  "cosmic-client-toolkit",
  "dnd",
+ "ferese-shape",
  "glam",
  "iced_accessibility",
  "lilt",
