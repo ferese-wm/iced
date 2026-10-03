@@ -43,6 +43,13 @@ impl Pipeline {
         clip_mask: &tiny_skia::Mask,
         clip_bounds: Rectangle,
     ) {
+        if matches!(background, Background::Color(color) if color.a <= 0.0)
+            && (quad.border.width <= 0.0 || quad.border.color.a <= 0.0)
+            && quad.shadow.color.a <= 0.0
+        {
+            return;
+        }
+
         let scale = transformation.scale_factor();
         let translation = transformation.translation();
         let mut bounds = quad.bounds * transformation;
@@ -92,9 +99,11 @@ impl Pipeline {
         let offset = if shadow { shadow_offset } else { [0.0; 2] };
         let left = (bounds.x as f64 + offset[0].min(0.0) - extent)
             .floor()
+            .max(clip_bounds.x.floor() as f64)
             .max(0.0) as u32;
         let top = (bounds.y as f64 + offset[1].min(0.0) - extent)
             .floor()
+            .max(clip_bounds.y.floor() as f64)
             .max(0.0) as u32;
         let right = (bounds.x as f64
             + bounds.width as f64
@@ -102,14 +111,18 @@ impl Pipeline {
             + extent)
             .ceil()
             .max(0.0)
-            .min(pixels.width() as f64) as u32;
+            .min(pixels.width() as f64)
+            .min((clip_bounds.x + clip_bounds.width).ceil() as f64)
+            as u32;
         let bottom = (bounds.y as f64
             + bounds.height as f64
             + offset[1].max(0.0)
             + extent)
             .ceil()
             .max(0.0)
-            .min(pixels.height() as f64) as u32;
+            .min(pixels.height() as f64)
+            .min((clip_bounds.y + clip_bounds.height).ceil() as f64)
+            as u32;
 
         if left >= right || top >= bottom {
             return;
@@ -254,7 +267,10 @@ impl Pipeline {
             left as i32,
             top as i32,
             fill.as_ref(),
-            &tiny_skia::PixmapPaint::default(),
+            &tiny_skia::PixmapPaint {
+                quality: tiny_skia::FilterQuality::Nearest,
+                ..tiny_skia::PixmapPaint::default()
+            },
             tiny_skia::Transform::identity(),
             Some(clip_mask),
         );

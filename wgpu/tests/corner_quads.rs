@@ -213,3 +213,89 @@ fn check_quads(renderer: &mut (impl Renderer + Headless)) {
         }
     }
 }
+
+#[test]
+fn software_quad_regions_respect_hard_clipping() {
+    let mut renderer =
+        iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
+    let viewport = Rectangle::with_size(Size::new(90.0, 80.0));
+    let clip = Rectangle {
+        x: 20.0,
+        y: 16.0,
+        width: 40.0,
+        height: 44.0,
+    };
+    let parent =
+        Outline::new([13.25, 12.5, 56.0, 44.0], [12.0; 4], Shape::Continuous)
+            .unwrap();
+
+    for scale in [1.0f32, 1.25, 1.5] {
+        for inset in [0.0, 3.25, 24.0] {
+            let quad = Quad {
+                bounds: Rectangle {
+                    x: 13.25,
+                    y: 12.5,
+                    width: 56.0,
+                    height: 44.0,
+                },
+                border: Border {
+                    color: Color::from_rgba(0.7, 0.2, 0.1, 0.6),
+                    width: 1.25,
+                    ..Default::default()
+                }
+                .outline(parent.inset(inset).unwrap()),
+                shadow: Shadow {
+                    color: Color::from_rgba(0.1, 0.2, 0.7, 0.5),
+                    offset: Vector::new(2.25, 3.5),
+                    blur_radius: 4.0,
+                },
+                ..Default::default()
+            };
+            let background = Background::Gradient(
+                iced_wgpu::core::gradient::Linear::new(0.7)
+                    .add_stop(0.0, Color::from_rgba(0.2, 0.7, 0.3, 0.5))
+                    .add_stop(1.0, Color::from_rgba(0.8, 0.4, 0.1, 0.9))
+                    .into(),
+            );
+            let size = Size::new((90.0 * scale) as u32, (80.0 * scale) as u32);
+            renderer.reset(viewport);
+            renderer.fill_quad(quad, background);
+            let full = Headless::screenshot(
+                &mut renderer,
+                size,
+                scale,
+                Color::TRANSPARENT,
+            );
+            renderer.reset(viewport);
+            renderer.with_layer(clip, |renderer| {
+                renderer.fill_quad(quad, background)
+            });
+            let clipped = Headless::screenshot(
+                &mut renderer,
+                size,
+                scale,
+                Color::TRANSPARENT,
+            );
+
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    let index = ((y * size.width + x) * 4) as usize;
+                    let p = iced_wgpu::core::Point::new(
+                        (x as f32 + 0.5) / scale,
+                        (y as f32 + 0.5) / scale,
+                    );
+                    let expected = if clip.contains(p) {
+                        &full[index..index + 4]
+                    } else {
+                        &[0; 4]
+                    };
+                    assert_eq!(
+                        &clipped[index..index + 4],
+                        expected,
+                        "scale={scale} inset={inset} p={p:?}"
+                    );
+                }
+            }
+        }
+    }
+}
