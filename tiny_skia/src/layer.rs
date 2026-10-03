@@ -15,6 +15,7 @@ pub type Stack = layer::Stack<Layer>;
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub bounds: Rectangle,
+    pub clips: layer::ClipState,
     pub quads: Vec<(Quad, Background)>,
     pub primitives: Vec<Item<Primitive>>,
     pub images: Vec<Image>,
@@ -45,7 +46,7 @@ impl Layer {
 
             quad.border.width *= scale;
             quad.border.radius = quad.border.radius * scale;
-            quad.shadow.offset = quad.shadow.offset * scale;
+            quad.shadow.offset *= scale;
             quad.shadow.blur_radius *= scale;
         }
 
@@ -252,6 +253,13 @@ impl Layer {
     }
 
     pub fn damage(previous: &Self, current: &Self) -> Vec<Rectangle> {
+        if previous.clips != current.clips {
+            return vec![
+                previous.bounds.expand(1.0),
+                current.bounds.expand(1.0),
+            ];
+        }
+
         if previous.bounds != current.bounds {
             return vec![previous.bounds, current.bounds];
         }
@@ -364,6 +372,7 @@ impl Default for Layer {
     fn default() -> Self {
         Self {
             bounds: Rectangle::INFINITE,
+            clips: layer::ClipState::default(),
             quads: Vec::new(),
             primitives: Vec::new(),
             text: Vec::new(),
@@ -384,6 +393,14 @@ impl graphics::Layer for Layer {
         self.bounds
     }
 
+    fn clips(&self) -> &layer::ClipState {
+        &self.clips
+    }
+
+    fn set_clips(&mut self, clips: layer::ClipState) {
+        self.clips = clips;
+    }
+
     fn flush(&mut self) {}
 
     fn resize(&mut self, bounds: Rectangle) {
@@ -392,6 +409,7 @@ impl graphics::Layer for Layer {
 
     fn reset(&mut self) {
         self.bounds = Rectangle::INFINITE;
+        self.clips = layer::ClipState::default();
 
         self.quads.clear();
         self.primitives.clear();

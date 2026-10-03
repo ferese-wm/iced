@@ -1,5 +1,78 @@
 //! Draw and stack layers of graphical primitives.
-use crate::core::{Rectangle, Transformation};
+use crate::core::border::Outline;
+use crate::core::{Rectangle, Size, Transformation};
+
+/// One explicitly shaped content group, distinct from a rectangular clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapedClip {
+    pub id: u64,
+    pub outline: Option<Outline>,
+    pub bounds: Rectangle,
+}
+
+impl ShapedClip {
+    /// Resolves reference geometry to the renderer's physical coordinate range.
+    pub fn physical(
+        &self,
+        scale: f32,
+        size: Size<u32>,
+    ) -> Option<(Outline, Rectangle)> {
+        let outline = self.outline?.transformed([0.0; 2], scale as f64)?;
+
+        if !outline
+            .bounds()
+            .into_iter()
+            .chain(outline.radii())
+            .chain([outline.inset_distance()])
+            .all(|value| (value as f32).is_finite())
+        {
+            return None;
+        }
+
+        let viewport = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: size.width as f32,
+            height: size.height as f32,
+        };
+        let bounds =
+            (self.bounds * scale).intersection(&viewport.expand(0.5))?;
+        Some((outline, bounds))
+    }
+}
+
+/// Rectangular clips stay hard; shaped contours have a physical-pixel edge ramp.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipState {
+    pub shapes: Vec<ShapedClip>,
+    pub hard_bounds: Rectangle,
+}
+
+impl Default for ClipState {
+    fn default() -> Self {
+        Self {
+            shapes: Vec::new(),
+            hard_bounds: Rectangle::INFINITE,
+        }
+    }
+}
+
+impl ClipState {
+    /// Coarse physical bounds include the antialiasing fringe of shaped contours.
+    pub fn physical_bounds(
+        &self,
+        bounds: Rectangle,
+        scale: f32,
+    ) -> Option<Rectangle> {
+        let bounds = bounds * scale;
+
+        if self.shapes.is_empty() {
+            Some(bounds)
+        } else {
+            bounds.expand(0.5).intersection(&(self.hard_bounds * scale))
+        }
+    }
+}
 
 /// A layer of graphical primitives.
 ///
@@ -11,6 +84,12 @@ pub trait Layer: Default {
 
     /// Returns the current bounds of the [`Layer`].
     fn bounds(&self) -> Rectangle;
+
+    /// Returns the rectangular and shaped clipping state.
+    fn clips(&self) -> &ClipState;
+
+    /// Sets the clipping state for a reused layer.
+    fn set_clips(&mut self, clips: ClipState);
 
     /// Flushes and settles any pending group of primitives in the [`Layer`].
     ///
@@ -51,6 +130,7 @@ pub struct Stack<T: Layer> {
     previous: Vec<usize>,
     current: usize,
     active_count: usize,
+    next_clip: u64,
 }
 
 impl<T: Layer> Stack<T> {
@@ -62,6 +142,7 @@ impl<T: Layer> Stack<T> {
             previous: vec![],
             current: 0,
             active_count: 1,
+            next_clip: 0,
         }
     }
 
@@ -84,6 +165,41 @@ impl<T: Layer> Stack<T> {
     /// process.
     pub fn push_clip(&mut self, bounds: Rectangle) {
         let bounds = bounds * self.transformation();
+        let mut clips = self.layers[self.current].clips().clone();
+        clips.hard_bounds =
+            clips
+                .hard_bounds
+                .intersection(&bounds)
+                .unwrap_or(Rectangle {
+                    width: 0.0,
+                    height: 0.0,
+                    ..bounds
+                });
+        self.push_layer(bounds, clips);
+    }
+
+    /// Starts a shaped group, retaining its reference geometry through transforms.
+    pub fn push_shaped_clip(&mut self, bounds: Rectangle, outline: Outline) {
+        self.flush();
+        let transformation = self.transformation();
+        let translation = transformation.translation();
+        let bounds = bounds * transformation;
+        let mut clips = self.layers[self.current].clips().clone();
+        let outline = outline.transformed(
+            [translation.x as f64, translation.y as f64],
+            transformation.scale_factor() as f64,
+        );
+        let id = self.next_clip;
+        self.next_clip += 1;
+        clips.shapes.push(ShapedClip {
+            id,
+            outline,
+            bounds,
+        });
+        self.push_layer(bounds, clips);
+    }
+
+    fn push_layer(&mut self, bounds: Rectangle, clips: ClipState) {
         let bounds = bounds
             .intersection(&self.layers[self.current].bounds())
             .unwrap_or(Rectangle {
@@ -91,9 +207,11 @@ impl<T: Layer> Stack<T> {
                 height: 0.0,
                 ..bounds
             });
-
         self.previous.push(self.current);
+        self.next_layer(bounds, clips);
+    }
 
+    fn next_layer(&mut self, bounds: Rectangle, clips: ClipState) {
         self.current = self.active_count;
         self.active_count += 1;
 
@@ -102,6 +220,8 @@ impl<T: Layer> Stack<T> {
         } else {
             self.layers[self.current].resize(bounds);
         }
+
+        self.layers[self.current].set_clips(clips);
     }
 
     /// Pops the current clipping region from the [`Stack`] and restores the previous one.
@@ -110,7 +230,21 @@ impl<T: Layer> Stack<T> {
     pub fn pop_clip(&mut self) {
         self.flush();
 
-        self.current = self.previous.pop().unwrap();
+        let parent = self.previous.pop().unwrap();
+        let child = self.layers[self.current].clips();
+        let clips = self.layers[parent].clips();
+
+        if self.next_clip != 0
+            || !clips.shapes.is_empty()
+            || child.shapes != clips.shapes
+        {
+            // Content after a masked group must follow it in painter order.
+            let bounds = self.layers[parent].bounds();
+            let clips = clips.clone();
+            self.next_layer(bounds, clips);
+        } else {
+            self.current = parent;
+        }
     }
 
     /// Pushes a new [`Transformation`] in the [`Stack`].
@@ -175,7 +309,10 @@ impl<T: Layer> Stack<T> {
 
                 // Candidate can be merged if primitive sublayers do not overlap with
                 // previous targets and the clipping bounds match
-                if end > target_start || candidate.bounds() != target.bounds() {
+                if end > target_start
+                    || candidate.bounds() != target.bounds()
+                    || candidate.clips() != target.clips()
+                {
                     break;
                 }
 
@@ -215,6 +352,11 @@ impl<T: Layer> Stack<T> {
         }
 
         self.layers[0].resize(new_bounds);
+        self.layers[0].set_clips(ClipState {
+            hard_bounds: new_bounds,
+            ..ClipState::default()
+        });
+        self.next_clip = 0;
         self.current = 0;
         self.active_count = 1;
         self.previous.clear();
@@ -224,5 +366,137 @@ impl<T: Layer> Stack<T> {
 impl<T: Layer> Default for Stack<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::shape::Shape;
+
+    #[derive(Default)]
+    struct Recorded {
+        bounds: Rectangle,
+        clips: ClipState,
+        marks: Vec<u8>,
+    }
+
+    impl Layer for Recorded {
+        fn with_bounds(bounds: Rectangle) -> Self {
+            Self {
+                bounds,
+                ..Default::default()
+            }
+        }
+        fn bounds(&self) -> Rectangle {
+            self.bounds
+        }
+        fn clips(&self) -> &ClipState {
+            &self.clips
+        }
+        fn set_clips(&mut self, clips: ClipState) {
+            self.clips = clips;
+        }
+        fn flush(&mut self) {}
+        fn resize(&mut self, bounds: Rectangle) {
+            self.bounds = bounds;
+        }
+        fn reset(&mut self) {
+            *self = Self::default();
+        }
+        fn start(&self) -> usize {
+            1
+        }
+        fn end(&self) -> usize {
+            if self.marks.is_empty() { 0 } else { 1 }
+        }
+        fn merge(&mut self, layer: &mut Self) {
+            self.marks.append(&mut layer.marks);
+        }
+    }
+
+    fn outline() -> Outline {
+        Outline::new([10.25, 9.5, 30.0, 25.0], [8.0; 4], Shape::Continuous)
+            .unwrap()
+    }
+
+    #[test]
+    fn shaped_groups_keep_order_and_sibling_identity_through_merge() {
+        let bounds = Rectangle::with_size(Size::new(100.0, 90.0));
+        let mut stack = Stack::<Recorded>::new();
+        stack.reset(bounds);
+        stack.current_mut().0.marks.push(0);
+        stack.push_clip(bounds);
+        stack.current_mut().0.marks.push(1);
+        stack.push_shaped_clip(bounds, outline());
+        stack.current_mut().0.marks.push(2);
+        stack.pop_clip();
+        stack.current_mut().0.marks.push(3);
+        stack.push_shaped_clip(bounds, outline());
+        stack.current_mut().0.marks.push(4);
+        stack.pop_clip();
+        stack.current_mut().0.marks.push(5);
+        stack.pop_clip();
+        stack.current_mut().0.marks.push(6);
+        stack.merge();
+        assert_eq!(
+            stack
+                .iter()
+                .flat_map(|layer| layer.marks.iter().copied())
+                .collect::<Vec<_>>(),
+            (0..7).collect::<Vec<_>>()
+        );
+        let ids = stack
+            .iter()
+            .filter(|layer| !layer.marks.is_empty())
+            .filter_map(|layer| layer.clips.shapes.last().map(|shape| shape.id))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![0, 1]);
+
+        stack.reset(bounds);
+        assert!(stack.iter().all(
+            |layer| layer.clips.shapes.is_empty() && layer.marks.is_empty()
+        ));
+        stack.push_clip(bounds);
+        stack.pop_clip();
+        assert_eq!(
+            stack.current, 0,
+            "ordinary layers retain their previous behavior after reset"
+        );
+    }
+
+    #[test]
+    fn transforms_apply_once_and_shaped_fringe_respects_hard_clip() {
+        let screen = Rectangle::with_size(Size::new(100.0, 90.0));
+        let mut stack = Stack::<Recorded>::new();
+        stack.reset(screen);
+        stack.push_transformation(
+            Transformation::translate(3.0, 2.0) * Transformation::scale(1.5),
+        );
+        let bounds = Rectangle {
+            x: 10.25,
+            y: 9.5,
+            width: 30.0,
+            height: 25.0,
+        };
+        stack.push_shaped_clip(bounds, outline());
+        let layer = stack.current_mut().0;
+        assert_eq!(
+            layer.clips.shapes[0].outline,
+            outline().transformed([3.0, 2.0], 1.5)
+        );
+        assert_eq!(
+            layer.clips.physical_bounds(layer.bounds, 1.25),
+            Some((layer.bounds * 1.25).expand(0.5))
+        );
+        stack.push_clip(bounds);
+        let layer = stack.current_mut().0;
+        assert_eq!(
+            layer.clips.physical_bounds(layer.bounds, 1.25),
+            Some(layer.bounds * 1.25)
+        );
+        stack.pop_clip();
+        stack.pop_clip();
+        stack.pop_transformation();
     }
 }

@@ -312,7 +312,6 @@ fn drawing_bounds<Renderer, Handle>(
     rotation: Rotation,
     scale: f32,
     opacity: f32,
-    border_radius: [f32; 4],
 ) -> Rectangle
 where
     Renderer: image::Renderer<Handle = Handle>,
@@ -444,7 +443,6 @@ fn draw_with_outline<Renderer, Handle>(
         rotation,
         scale,
         opacity,
-        border_radius.into(),
     );
 
     renderer.draw_image(

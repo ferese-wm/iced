@@ -2,6 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 pub mod window;
 
+mod clipping;
 mod engine;
 mod layer;
 mod primitive;
@@ -48,6 +49,7 @@ pub struct Renderer {
     default_text_size: Pixels,
     layers: layer::Stack,
     engine: Engine, // TODO: Shared engine
+    clipping: clipping::Pipeline,
 }
 
 impl Renderer {
@@ -57,6 +59,7 @@ impl Renderer {
             default_text_size,
             layers: layer::Stack::new(),
             engine: Engine::new(),
+            clipping: clipping::Pipeline::default(),
         }
     }
 
@@ -105,12 +108,55 @@ impl Renderer {
                 None,
             );
 
+            let mut active = Vec::<graphics::layer::ShapedClip>::new();
+            let mut groups = Vec::<clipping::Group>::new();
+
             for layer in self.layers.iter() {
-                let Some(layer_bounds) =
-                    damage_bounds.intersection(&(layer.bounds * scale_factor))
+                let Some(layer_bounds) = layer
+                    .clips
+                    .physical_bounds(layer.bounds, scale_factor)
+                    .and_then(|bounds| damage_bounds.intersection(&bounds))
                 else {
                     continue;
                 };
+
+                let common = active
+                    .iter()
+                    .zip(&layer.clips.shapes)
+                    .take_while(|(a, b)| a.id == b.id)
+                    .count();
+
+                while active.len() > common {
+                    self.clipping.finish(&mut groups, pixels);
+                    let _ = active.pop();
+                }
+
+                for index in common..layer.clips.shapes.len() {
+                    let group = self
+                        .clipping
+                        .begin(
+                            &layer.clips.shapes[..=index],
+                            Size::new(pixels.width(), pixels.height()),
+                            scale_factor,
+                        )
+                        .expect("shaped layer allocation");
+                    groups.push(group);
+                    active.push(layer.clips.shapes[index].clone());
+                }
+
+                let width = pixels.width();
+                let height = pixels.height();
+                let mut target = if let Some(group) = groups.last_mut() {
+                    group.pixmap.as_mut()
+                } else {
+                    tiny_skia::PixmapMut::from_bytes(
+                        pixels.data_mut(),
+                        width,
+                        height,
+                    )
+                    .expect("valid destination pixels")
+                };
+                let pixels = &mut target;
 
                 engine::adjust_clip_mask(clip_mask, layer_bounds);
 
@@ -194,6 +240,10 @@ impl Renderer {
                     render_span.finish();
                 }
             }
+
+            while !groups.is_empty() {
+                self.clipping.finish(&mut groups, pixels);
+            }
         }
 
         self.engine.trim();
@@ -203,6 +253,14 @@ impl Renderer {
 impl core::Renderer for Renderer {
     fn start_layer(&mut self, bounds: Rectangle) {
         self.layers.push_clip(bounds);
+    }
+
+    fn start_shaped_layer(
+        &mut self,
+        bounds: Rectangle,
+        outline: core::border::Outline,
+    ) {
+        self.layers.push_shaped_clip(bounds, outline);
     }
 
     fn end_layer(&mut self) {

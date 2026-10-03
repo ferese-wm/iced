@@ -1,4 +1,5 @@
 use crate::Primitive;
+#[cfg(feature = "svg")]
 use tiny_skia::Transform;
 
 use crate::core::renderer::Quad;

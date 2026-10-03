@@ -13,6 +13,26 @@ pub trait Renderer {
     /// Starts recording a new layer.
     fn start_layer(&mut self, bounds: Rectangle);
 
+    /// Starts an opt-in layer masked by a reference outline.
+    /// A rounded background alone does not clip child content.
+    fn start_shaped_layer(
+        &mut self,
+        bounds: Rectangle,
+        outline: crate::border::Outline,
+    );
+
+    /// Draws child content through a reference contour, including its inset.
+    fn with_shaped_layer(
+        &mut self,
+        bounds: Rectangle,
+        outline: crate::border::Outline,
+        f: impl FnOnce(&mut Self),
+    ) {
+        self.start_shaped_layer(bounds, outline);
+        f(self);
+        self.end_layer();
+    }
+
     /// Ends recording a new layer.
     ///
     /// The new layer will clip its contents to the provided `bounds`.

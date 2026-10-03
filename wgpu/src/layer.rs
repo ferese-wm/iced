@@ -19,6 +19,7 @@ pub type Stack = layer::Stack<Layer>;
 #[derive(Debug)]
 pub struct Layer {
     pub bounds: Rectangle,
+    pub clips: layer::ClipState,
     pub quads: quad::Batch,
     pub triangles: triangle::Batch,
     pub primitives: primitive::Batch,
@@ -364,6 +365,14 @@ impl graphics::Layer for Layer {
         self.bounds
     }
 
+    fn clips(&self) -> &layer::ClipState {
+        &self.clips
+    }
+
+    fn set_clips(&mut self, clips: layer::ClipState) {
+        self.clips = clips;
+    }
+
     fn flush(&mut self) {
         self.flush_meshes();
         self.flush_text();
@@ -375,6 +384,7 @@ impl graphics::Layer for Layer {
 
     fn reset(&mut self) {
         self.bounds = Rectangle::INFINITE;
+        self.clips = layer::ClipState::default();
 
         self.quads.clear();
         self.triangles.clear();
@@ -446,6 +456,7 @@ impl Default for Layer {
     fn default() -> Self {
         Self {
             bounds: Rectangle::INFINITE,
+            clips: layer::ClipState::default(),
             quads: quad::Batch::default(),
             triangles: triangle::Batch::default(),
             primitives: primitive::Batch::default(),
