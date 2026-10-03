@@ -82,7 +82,12 @@ impl Layer {
             position: [bounds.x, bounds.y],
             size: [bounds.width, bounds.height],
             border_color: color::pack(quad.border.color),
-            border_radius: outline.radii().map(|v| v as f32),
+            border_radius: if quad.border.outline.is_some() {
+                outline.radii().map(|v| v as f32)
+            } else {
+                <[f32; 4]>::from(quad.border.radius)
+                    .map(|r| (r * scale).max(0.0))
+            },
             border_width: if contour == 0 {
                 quad.border.width * scale
             } else {

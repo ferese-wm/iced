@@ -19,6 +19,7 @@ fn fills_borders_shadows_and_reference_insets_match_distance_coverage() {
         .expect("GPU renderer");
         check_quads(&mut renderer);
         check_reference_card(&mut renderer);
+        check_post_snap_normalization(&mut renderer);
     });
 }
 
@@ -28,6 +29,7 @@ fn software_quads_match_distance_coverage() {
         iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
     check_quads(&mut renderer);
     check_reference_card(&mut renderer);
+    check_post_snap_normalization(&mut renderer);
 }
 
 fn check_quads(renderer: &mut (impl Renderer + Headless)) {
@@ -431,6 +433,71 @@ fn check_reference_card(renderer: &mut (impl Renderer + Headless)) {
                     assert!(
                         (actual - expected).abs() <= 2.0 / 255.0,
                         "card scale={scale} inset={inset} p=({x},{y}): alpha={actual} reference={expected}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn check_post_snap_normalization(renderer: &mut (impl Renderer + Headless)) {
+    let viewport = Rectangle::with_size(Size::new(40.0, 40.0));
+    let bounds = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 26.0,
+        height: 26.0,
+    };
+    let scale = 1.25f32;
+
+    for radius in [12.0f32, 13.0, 14.0, 40.0] {
+        for gradient in [false, true] {
+            renderer.reset(viewport);
+            let background = if gradient {
+                Background::Gradient(
+                    iced_wgpu::core::gradient::Linear::new(0.7)
+                        .add_stop(0.0, Color::WHITE)
+                        .add_stop(1.0, Color::WHITE)
+                        .into(),
+                )
+            } else {
+                Background::Color(Color::WHITE)
+            };
+            renderer.fill_quad(
+                Quad {
+                    bounds,
+                    border: Border::default()
+                        .rounded(radius)
+                        .shape(Shape::Continuous),
+                    snap: true,
+                    ..Default::default()
+                },
+                background,
+            );
+            let pixels = Headless::screenshot(
+                renderer,
+                Size::new(50, 50),
+                scale,
+                Color::TRANSPARENT,
+            );
+            let expected = Outline::new(
+                [0.0, 0.0, 33.0, 33.0],
+                [radius as f64 * scale as f64; 4],
+                Shape::Continuous,
+            )
+            .unwrap();
+
+            for y in 0..50 {
+                for x in 0..50 {
+                    let alpha =
+                        pixels[((y * 50 + x) * 4 + 3) as usize] as f64 / 255.0;
+                    let reference = edge_coverage(
+                        expected
+                            .signed_distance([x as f64 + 0.5, y as f64 + 0.5]),
+                    );
+                    assert!(
+                        (alpha - reference).abs() <= 2.0 / 255.0,
+                        "post-snap radius={radius} gradient={gradient} p=({x},{y}) alpha={alpha} reference={reference}"
                     );
                 }
             }

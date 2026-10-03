@@ -687,6 +687,31 @@ fn add_instances(
         clip_bounds = snap_bounds(clip_bounds, scale);
     }
 
+    if bounds.width <= 0.0
+        || bounds.height <= 0.0
+        || clip_bounds.width <= 0.0
+        || clip_bounds.height <= 0.0
+        || ![
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            bounds.x + bounds.width,
+            bounds.y + bounds.height,
+            clip_bounds.x,
+            clip_bounds.y,
+            clip_bounds.width,
+            clip_bounds.height,
+            clip_bounds.x + clip_bounds.width,
+            clip_bounds.y + clip_bounds.height,
+            rotation,
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+    {
+        return;
+    }
+
     let Some(outline) = reference.or_else(|| {
         border::Outline::new(
             [

@@ -55,6 +55,29 @@ impl Pipeline {
         clip_mask: &tiny_skia::Mask,
         damage_bounds: Rectangle,
     ) {
+        if Outline::new(
+            [bounds.x, bounds.y, bounds.width, bounds.height].map(f64::from),
+            [0.0; 4],
+            crate::core::shape::Shape::Circular,
+        )
+        .is_none()
+            || Outline::new(
+                [
+                    clip_bounds.x,
+                    clip_bounds.y,
+                    clip_bounds.width,
+                    clip_bounds.height,
+                ]
+                .map(f64::from),
+                [0.0; 4],
+                crate::core::shape::Shape::Circular,
+            )
+            .is_none()
+            || !f32::from(image.rotation).is_finite()
+        {
+            return;
+        }
+
         let Some(region) = clip_bounds
             .expand(1.0)
             .intersection(&damage_bounds)

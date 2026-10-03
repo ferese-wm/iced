@@ -91,6 +91,10 @@ fn gradient_vs_main(input: GradientVertexInput) -> GradientVertexOutput {
     out.position_and_scale = vec4<f32>(pos + pos_snap, scale + scale_snap);
     out.border_color = premultiply(input.border_color);
     out.border_radius = border_radius * globals.scale;
+
+    if input.shape_and_contour.y == 1u {
+        out.border_radius = min(out.border_radius, vec4(min(out.position_and_scale.z, out.position_and_scale.w) * 0.5));
+    }
     out.border_width = input.border_width * globals.scale;
     out.shadow_color = premultiply(input.shadow_color);
     out.shadow_offset_and_blur = input.shadow_offset_and_blur * globals.scale;

@@ -17,6 +17,7 @@ fn gpu_images_use_destination_scale_contours() {
         .await
         .unwrap();
         check_images(&mut renderer);
+        check_invalid_image_bounds(&mut renderer);
     });
 }
 
@@ -25,6 +26,7 @@ fn software_images_use_destination_scale_contours() {
     let mut renderer =
         iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
     check_images(&mut renderer);
+    check_invalid_image_bounds(&mut renderer);
 }
 
 fn check_images(
@@ -338,4 +340,44 @@ fn svg_rotation_agrees_between_backends() {
             }
         }
     });
+}
+
+fn check_invalid_image_bounds(
+    renderer: &mut (impl Headless + image::Renderer<Handle = Handle>),
+) {
+    let handle = Handle::from_rgba(1, 1, vec![255; 4]);
+    let viewport = Rectangle::with_size(Size::new(40.0, 40.0));
+    let reference =
+        Outline::new([0.0, 0.0, 40.0, 40.0], [8.0; 4], Shape::Continuous)
+            .unwrap();
+
+    for outline in [None, Some(reference)] {
+        for width in [0.0f32, -1.0, 0.25, f32::NAN, f32::INFINITY] {
+            renderer.reset(viewport);
+            let mut image = image::Image::new(handle.clone())
+                .shape(Shape::Continuous)
+                .snap(true);
+            image.outline = outline;
+            renderer.draw_image(
+                image,
+                Rectangle {
+                    x: 10.0,
+                    y: 10.0,
+                    width,
+                    height: 20.0,
+                },
+                viewport,
+            );
+            let pixels = Headless::screenshot(
+                renderer,
+                Size::new(40, 40),
+                1.0,
+                Color::TRANSPARENT,
+            );
+            assert!(
+                pixels.iter().all(|p| *p == 0),
+                "invalid width={width:?} outline={outline:?}"
+            );
+        }
+    }
 }

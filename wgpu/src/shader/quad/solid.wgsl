@@ -72,6 +72,10 @@ fn solid_vs_main(input: SolidVertexInput) -> SolidVertexOutput {
     out.pos = input.pos * globals.scale + pos_snap;
     out.scale = input.scale * globals.scale + scale_snap;
     out.border_radius = border_radius * globals.scale;
+
+    if input.shape_and_contour.y == 1u {
+        out.border_radius = min(out.border_radius, vec4(min(out.scale.x, out.scale.y) * 0.5));
+    }
     out.border_width = input.border_width * globals.scale;
     out.shadow_color = premultiply(input.shadow_color);
     out.shadow_offset = input.shadow_offset * globals.scale;

@@ -82,7 +82,8 @@ impl Pipeline {
                 let Some(snapped) = Outline::new(
                     [bounds.x, bounds.y, bounds.width, bounds.height]
                         .map(f64::from),
-                    outline.radii(),
+                    <[f32; 4]>::from(quad.border.radius)
+                        .map(|r| f64::from(r * scale)),
                     outline.shape(),
                 ) else {
                     return;
