@@ -522,6 +522,7 @@ where
                 bounds,
                 border: Border {
                     radius: style.border_radius,
+                    shape: style.shape,
                     width: style.background_border_width,
                     color: style.background_border_color,
                     ..Default::default()
@@ -549,6 +550,7 @@ where
                 bounds: toggler_foreground_bounds,
                 border: Border {
                     radius: style.handle_radius,
+                    shape: style.shape,
                     width: style.foreground_border_width,
                     color: style.foreground_border_color,
                     ..Default::default()
@@ -694,6 +696,8 @@ pub enum Status {
 /// The appearance of a toggler.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Style {
+    /// The corner profile of the track and handle.
+    pub shape: crate::core::border::Shape,
     /// The background [`Color`] of the toggler.
     pub background: Background,
     /// The width of the background border of the toggler.
@@ -790,6 +794,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
     };
 
     Style {
+        shape: crate::core::border::Shape::Circular,
         background: background.into(),
         foreground: foreground.into(),
         foreground_border_width: 0.0,

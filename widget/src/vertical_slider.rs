@@ -518,6 +518,14 @@ where
                 },
                 border: Border {
                     radius: handle_border_radius,
+                    shape: match style.handle.shape {
+                        HandleShape::Circle { .. } => {
+                            crate::core::border::Shape::Circular
+                        }
+                        HandleShape::Rectangle { .. } => {
+                            style.handle.corner_shape
+                        }
+                    },
                     width: style.handle.border_width,
                     color: style.handle.border_color,
                     ..Default::default()
