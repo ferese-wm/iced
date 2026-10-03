@@ -18,6 +18,7 @@ fn fills_borders_shadows_and_reference_insets_match_distance_coverage() {
         .await
         .expect("GPU renderer");
         check_quads(&mut renderer);
+        check_reference_card(&mut renderer);
     });
 }
 
@@ -26,6 +27,7 @@ fn software_quads_match_distance_coverage() {
     let mut renderer =
         iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
     check_quads(&mut renderer);
+    check_reference_card(&mut renderer);
 }
 
 fn check_quads(renderer: &mut (impl Renderer + Headless)) {
@@ -350,6 +352,87 @@ fn software_aligned_solid_rectangles_match_reference_masks() {
                     a.abs_diff(*b) <= 1,
                     "scale={scale} alpha={alpha}: fast={a} reference={b}"
                 );
+            }
+        }
+    }
+}
+
+fn check_reference_card(renderer: &mut (impl Renderer + Headless)) {
+    let bounds = Rectangle {
+        x: 13.25,
+        y: 12.5,
+        width: 56.0,
+        height: 44.0,
+    };
+    let outer =
+        Outline::new([13.25, 12.5, 56.0, 44.0], [12.0; 4], Shape::Continuous)
+            .unwrap();
+
+    for scale in [1.0f32, 1.25, 1.5] {
+        for inset in [0.0, 4.75, 24.0] {
+            renderer.reset(Rectangle::with_size(Size::new(90.0, 80.0)));
+            renderer.fill_quad(
+                Quad {
+                    bounds,
+                    border: Border {
+                        width: 1.25,
+                        color: Color::from_rgba(1.0, 1.0, 1.0, 0.9),
+                        ..Default::default()
+                    }
+                    .outline(outer),
+                    snap: false,
+                    ..Default::default()
+                },
+                Color::from_rgba(1.0, 1.0, 1.0, 0.35),
+            );
+            // The child keeps the parent's reference geometry. Its bounds
+            // need not match the parent's; no radius subtraction occurs.
+            if inset < 22.0 {
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + inset as f32,
+                            y: bounds.y + inset as f32,
+                            width: bounds.width - 2.0 * inset as f32,
+                            height: bounds.height - 2.0 * inset as f32,
+                        },
+                        border: Border {
+                            width: 0.75,
+                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.7),
+                            ..Default::default()
+                        }
+                        .outline(outer.inset(inset).unwrap()),
+                        snap: false,
+                        ..Default::default()
+                    },
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+                );
+            }
+            let size = Size::new((90.0 * scale) as u32, (80.0 * scale) as u32);
+            let pixels =
+                Headless::screenshot(renderer, size, scale, Color::TRANSPARENT);
+            let physical = outer.transformed([0.0; 2], scale as f64).unwrap();
+
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    let distance = physical
+                        .signed_distance([x as f64 + 0.5, y as f64 + 0.5]);
+                    let a = edge_coverage(distance);
+                    let ai = edge_coverage(distance + 1.25 * scale as f64);
+                    let parent = ai * 0.35 + (a - ai) * 0.9;
+                    let b = edge_coverage(distance + inset * scale as f64);
+                    let bi =
+                        edge_coverage(distance + (inset + 0.75) * scale as f64);
+                    let child = bi * 0.6 + (b - bi) * 0.7;
+                    let expected = child + parent * (1.0 - child);
+                    let actual = pixels[((y * size.width + x) * 4 + 3) as usize]
+                        as f64
+                        / 255.0;
+                    assert!(
+                        (actual - expected).abs() <= 2.0 / 255.0,
+                        "card scale={scale} inset={inset} p=({x},{y}): alpha={actual} reference={expected}"
+                    );
+                }
             }
         }
     }
