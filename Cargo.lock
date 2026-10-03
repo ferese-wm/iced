@@ -1963,7 +1963,7 @@ dependencies = [
 [[package]]
 name = "ferese-shape"
 version = "0.1.0"
-source = "git+https://github.com/ferese-wm/ferese-shape?rev=df93da8#df93da8add59c208a9e4124f95455e8a5701435b"
+source = "git+https://github.com/ferese-wm/ferese-shape?rev=eabca033e3a53cb079cd4eeaa6f7d46f4d9b05d8#eabca033e3a53cb079cd4eeaa6f7d46f4d9b05d8"
 
 [[package]]
 name = "ferris"

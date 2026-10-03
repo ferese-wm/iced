@@ -72,4 +72,4 @@ build_helpers = { path = "../build_helpers" }
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }
-iced_tiny_skia.workspace = true
+iced_tiny_skia = { workspace = true, features = ["image"] }

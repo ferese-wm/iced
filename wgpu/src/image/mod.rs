@@ -113,12 +113,16 @@ impl Pipeline {
         let shader =
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("iced_wgpu image shader"),
-                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                    concat!(
-                        include_str!("../shader/vertex.wgsl"),
-                        "\n",
-                        include_str!("../shader/image.wgsl"),
-                    ),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(
+                    [
+                        crate::core::shape::WGSL,
+                        concat!(
+                            include_str!("../shader/vertex.wgsl"),
+                            "\n",
+                            include_str!("../shader/image.wgsl"),
+                        ),
+                    ]
+                    .join("\n"),
                 )),
             });
 
@@ -153,6 +157,11 @@ impl Pipeline {
                             8 => Sint32,
                             // Snap
                             9 => Uint32,
+                            // Reference contour
+                            10 => Float32x4,
+                            11 => Float32,
+                            12 => Uint32x2,
+                            13 => Float32x4,
                         ),
                     }],
                     compilation_options:
@@ -295,6 +304,9 @@ impl State {
                             *bounds,
                             *clip_bounds,
                             image.border_radius,
+                            image.shape,
+                            image.outline,
+                            Some(scale),
                             f32::from(image.rotation),
                             image.opacity,
                             image.snap,
@@ -350,6 +362,9 @@ impl State {
                             *bounds,
                             *clip_bounds,
                             border::radius(0),
+                            border::Shape::Circular,
+                            None,
+                            None,
                             f32::from(svg.rotation),
                             svg.opacity,
                             true,
@@ -633,6 +648,11 @@ struct Instance {
     _size_in_atlas: [f32; 2],
     _layer: u32,
     _snap: u32,
+    _outline_bounds: [f32; 4],
+    _outline_inset: f32,
+    _shape: u32,
+    _contour: u32,
+    _image_bounds: [f32; 4],
 }
 
 impl Instance {
@@ -650,15 +670,45 @@ struct Uniforms {
 }
 
 fn add_instances(
-    bounds: Rectangle,
-    clip_bounds: Rectangle,
+    mut bounds: Rectangle,
+    mut clip_bounds: Rectangle,
     border_radius: border::Radius,
+    shape: border::Shape,
+    reference: Option<border::Outline>,
+    physical_scale: Option<f32>,
     rotation: f32,
     opacity: f32,
     snap: bool,
     entry: &atlas::Entry,
     instances: &mut Vec<Instance>,
 ) {
+    if snap && let Some(scale) = physical_scale {
+        bounds = snap_bounds(bounds, scale);
+        clip_bounds = snap_bounds(clip_bounds, scale);
+    }
+
+    let Some(outline) = reference.or_else(|| {
+        border::Outline::new(
+            [
+                clip_bounds.x,
+                clip_bounds.y,
+                clip_bounds.width,
+                clip_bounds.height,
+            ]
+            .map(f64::from),
+            <[f32; 4]>::from(border_radius).map(f64::from),
+            shape,
+        )
+    }) else {
+        return;
+    };
+    let contour = if physical_scale.is_none() {
+        0
+    } else if reference.is_some() {
+        2
+    } else {
+        1
+    };
     let center = [
         bounds.x + bounds.width / 2.0,
         bounds.y + bounds.height / 2.0,
@@ -671,7 +721,7 @@ fn add_instances(
         clip_bounds.height,
     ];
 
-    let border_radius = border_radius.into();
+    let border_radius = outline.radii().map(|r| r as f32);
 
     match entry {
         atlas::Entry::Contiguous(allocation) => {
@@ -679,6 +729,9 @@ fn add_instances(
                 center,
                 clip_bounds,
                 border_radius,
+                outline,
+                contour,
+                [bounds.x, bounds.y, bounds.width, bounds.height],
                 [bounds.x, bounds.y, bounds.width, bounds.height],
                 rotation,
                 opacity,
@@ -711,6 +764,9 @@ fn add_instances(
                     center,
                     clip_bounds,
                     border_radius,
+                    outline,
+                    contour,
+                    [bounds.x, bounds.y, bounds.width, bounds.height],
                     tile,
                     rotation,
                     opacity,
@@ -728,6 +784,9 @@ fn add_instance(
     center: [f32; 2],
     clip_bounds: [f32; 4],
     border_radius: [f32; 4],
+    outline: border::Outline,
+    contour: u32,
+    image_bounds: [f32; 4],
     tile: [f32; 4],
     rotation: f32,
     opacity: f32,
@@ -756,8 +815,26 @@ fn add_instance(
             height as f32 / atlas_size as f32,
         ],
         _layer: layer as u32,
-        _snap: snap as u32,
+        _snap: (snap && contour == 0) as u32,
+        _outline_bounds: outline.bounds().map(|v| v as f32),
+        _outline_inset: outline.inset_distance() as f32,
+        _shape: outline.shape() as u32,
+        _contour: contour,
+        _image_bounds: image_bounds,
     };
 
     instances.push(instance);
+}
+
+fn snap_bounds(bounds: Rectangle, scale: f32) -> Rectangle {
+    let x = (bounds.x * scale + 0.001).round();
+    let y = (bounds.y * scale + 0.001).round();
+    let right = ((bounds.x + bounds.width) * scale + 0.001).round();
+    let bottom = ((bounds.y + bounds.height) * scale + 0.001).round();
+    Rectangle {
+        x: x / scale,
+        y: y / scale,
+        width: (right - x) / scale,
+        height: (bottom - y) / scale,
+    }
 }

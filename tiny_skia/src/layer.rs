@@ -179,11 +179,23 @@ impl Layer {
 
     pub fn draw_raster(
         &mut self,
-        image: core::Image,
+        mut image: core::Image,
         bounds: Rectangle,
         clip_bounds: Rectangle,
         transformation: Transformation,
     ) {
+        if let Some(outline) = image.outline {
+            let scale = transformation.scale_factor();
+            let translation = transformation.translation();
+            let Some(outline) = outline.transformed(
+                [translation.x as f64, translation.y as f64],
+                scale as f64,
+            ) else {
+                return;
+            };
+            image.outline = Some(outline);
+        }
+
         let image = Image::Raster {
             image: core::Image {
                 border_radius: image.border_radius

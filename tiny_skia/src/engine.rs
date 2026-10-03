@@ -596,34 +596,64 @@ impl Engine {
     ) {
         match image {
             #[cfg(feature = "image")]
-            Image::Raster { image, bounds, .. } => {
-                let physical_bounds = *bounds * _transformation;
+            Image::Raster {
+                image,
+                bounds,
+                clip_bounds,
+            } => {
+                let mut physical_bounds = *bounds * _transformation;
+                let mut physical_clip = *clip_bounds * _transformation;
 
-                if !_clip_bounds.intersects(&physical_bounds) {
-                    return;
+                if image.snap {
+                    let snap = |bounds: Rectangle| {
+                        let x = (bounds.x + 0.001).round();
+                        let y = (bounds.y + 0.001).round();
+                        let right = (bounds.x + bounds.width + 0.001).round();
+                        let bottom = (bounds.y + bounds.height + 0.001).round();
+                        Rectangle {
+                            x,
+                            y,
+                            width: right - x,
+                            height: bottom - y,
+                        }
+                    };
+                    physical_bounds = snap(physical_bounds);
+                    physical_clip = snap(physical_clip);
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&_clip_bounds))
-                    .then_some(_clip_mask as &_);
-
-                let center = physical_bounds.center();
-                let radians = f32::from(image.rotation);
-
-                let transform = Transform::default().post_rotate_at(
-                    radians.to_degrees(),
-                    center.x,
-                    center.y,
-                );
+                let scale = _transformation.scale_factor();
+                let translation = _transformation.translation();
+                let outline = if let Some(outline) = image.outline {
+                    outline.transformed(
+                        [translation.x as f64, translation.y as f64],
+                        scale as f64,
+                    )
+                } else {
+                    crate::core::shape::Outline::new(
+                        [
+                            physical_clip.x,
+                            physical_clip.y,
+                            physical_clip.width,
+                            physical_clip.height,
+                        ]
+                        .map(f64::from),
+                        <[f32; 4]>::from(image.border_radius)
+                            .map(|radius| f64::from(radius * scale)),
+                        image.shape,
+                    )
+                };
+                let Some(outline) = outline else {
+                    return;
+                };
 
                 self.raster_pipeline.draw(
-                    &image.handle,
-                    image.filter_method,
+                    image,
                     physical_bounds,
-                    image.opacity,
+                    outline,
+                    physical_clip,
                     _pixels,
-                    transform,
-                    clip_mask,
-                    image.border_radius.into(),
+                    _clip_mask,
+                    _clip_bounds,
                 );
             }
             #[cfg(feature = "svg")]

@@ -22,6 +22,39 @@ impl Builder {
         }
     }
 
+    /// Adds the contour of an outline, preserving its reference inset.
+    /// Tolerance uses the outline's units. A collapsed outline adds no geometry.
+    pub fn outline(
+        &mut self,
+        outline: border::Outline,
+        tolerance: f64,
+    ) -> Option<()> {
+        let points = outline.polygon(tolerance)?;
+        let points = points
+            .into_iter()
+            .map(|p| Point::new(p[0] as f32, p[1] as f32))
+            .collect::<Vec<_>>();
+
+        if !points
+            .iter()
+            .all(|point| point.x.is_finite() && point.y.is_finite())
+        {
+            return None;
+        }
+
+        if let Some((first, remaining)) = points.split_first() {
+            self.move_to(*first);
+
+            for point in remaining {
+                self.line_to(*point);
+            }
+
+            self.close();
+        }
+
+        Some(())
+    }
+
     /// Moves the starting point of a new sub-path to the given `Point`.
     #[inline]
     pub fn move_to(&mut self, point: Point) {
@@ -261,5 +294,65 @@ impl Builder {
 impl Default for Builder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outline_paths_keep_original_inset_geometry() {
+        let outline = border::Outline::new(
+            [1.25, 2.5, 100.0, 80.0],
+            [20.0; 4],
+            border::Shape::Continuous,
+        )
+        .unwrap()
+        .inset(4.0)
+        .unwrap();
+        let path = Path::outline(outline, 0.25).unwrap();
+        let mut count = 0;
+
+        for event in path.raw().iter() {
+            if let lyon_path::Event::Line { from, to } = event {
+                count += 1;
+
+                for step in 0..=32 {
+                    let t = step as f64 / 32.0;
+                    let point = [
+                        from.x as f64 + (to.x as f64 - from.x as f64) * t,
+                        from.y as f64 + (to.y as f64 - from.y as f64) * t,
+                    ];
+                    assert!(outline.signed_distance(point).abs() <= 0.25);
+                }
+            }
+        }
+
+        assert!(count > 16);
+    }
+
+    #[test]
+    fn failed_outline_addition_does_not_change_the_path() {
+        let outline = border::Outline::new(
+            [0.0, 0.0, 100.0, 80.0],
+            [20.0; 4],
+            border::Shape::Continuous,
+        )
+        .unwrap();
+        let mut builder = Builder::new();
+        builder.move_to(Point::new(1.0, 2.0));
+        builder.line_to(Point::new(3.0, 4.0));
+        assert!(builder.outline(outline, 0.0).is_none());
+        let path = builder.build();
+        assert_eq!(path.raw().iter().count(), 3);
+        assert_eq!(
+            Path::outline(outline.inset(41.0).unwrap(), 0.25)
+                .unwrap()
+                .raw()
+                .iter()
+                .count(),
+            0
+        );
     }
 }

@@ -346,6 +346,8 @@ where
                     Image {
                         handle: self.handle.clone(),
                         border_radius: border::Radius::default(),
+                        shape: border::Shape::Circular,
+                        outline: None,
                         filter_method: self.filter_method,
                         rotation: Radians(0.0),
                         opacity: 1.0,

@@ -88,7 +88,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             layout: None,
             module: &module,
             entry_point: Some("main"),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
     let input = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

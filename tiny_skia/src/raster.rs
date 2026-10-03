@@ -1,6 +1,9 @@
 use crate::core::image as raster;
+use crate::core::shape::{Outline, edge_coverage};
 use crate::core::{Rectangle, Size};
 use crate::graphics;
+use std::collections::VecDeque;
+use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
@@ -9,12 +12,16 @@ use std::collections::hash_map;
 #[derive(Debug)]
 pub struct Pipeline {
     cache: RefCell<Cache>,
+    masks: VecDeque<Arc<ClipMask>>,
+    mask_bytes: usize,
 }
 
 impl Pipeline {
     pub fn new() -> Self {
         Self {
             cache: RefCell::new(Cache::default()),
+            masks: VecDeque::new(),
+            mask_bytes: 0,
         }
     }
 
@@ -40,79 +47,198 @@ impl Pipeline {
 
     pub fn draw(
         &mut self,
-        handle: &raster::Handle,
-        filter_method: raster::FilterMethod,
+        image: &raster::Image,
         bounds: Rectangle,
-        opacity: f32,
+        outline: Outline,
+        clip_bounds: Rectangle,
         pixels: &mut tiny_skia::PixmapMut<'_>,
-        transform: tiny_skia::Transform,
-        clip_mask: Option<&tiny_skia::Mask>,
-        border_radius: [f32; 4],
+        clip_mask: &tiny_skia::Mask,
+        damage_bounds: Rectangle,
     ) {
+        let Some(region) = clip_bounds
+            .expand(1.0)
+            .intersection(&damage_bounds)
+            .and_then(|bounds| {
+                bounds.intersection(&Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: pixels.width() as f32,
+                    height: pixels.height() as f32,
+                })
+            })
+        else {
+            return;
+        };
+        let left = region.x.floor() as u32;
+        let top = region.y.floor() as u32;
+        let right =
+            (region.x + region.width).ceil().min(pixels.width() as f32) as u32;
+        let bottom = (region.y + region.height)
+            .ceil()
+            .min(pixels.height() as f32) as u32;
+        let Some(mut target) =
+            tiny_skia::Pixmap::new(right - left, bottom - top)
+        else {
+            return;
+        };
+        let Some(local_outline) =
+            outline.transformed([-(left as f64), -(top as f64)], 1.0)
+        else {
+            return;
+        };
+        let key = ClipKey {
+            outline: local_outline,
+            bounds: [
+                clip_bounds.x as f64 - left as f64,
+                clip_bounds.y as f64 - top as f64,
+                clip_bounds.width as f64,
+                clip_bounds.height as f64,
+            ],
+            size: [right - left, bottom - top],
+            image_bounds: [
+                bounds.x as f64 - left as f64,
+                bounds.y as f64 - top as f64,
+                bounds.width as f64,
+                bounds.height as f64,
+            ],
+            rotation: f32::from(image.rotation),
+        };
+        let mask = self.mask(key);
         let mut cache = self.cache.borrow_mut();
-
-        let target = {
-            let Ok(image) = cache.allocate(handle) else {
+        let resample = {
+            let Ok(decoded) = cache.allocate(&image.handle) else {
                 return;
             };
-
             graphics::image::downsample_target(
-                Size::new(image.width(), image.height()),
+                Size::new(decoded.width(), decoded.height()),
                 bounds.size(),
             )
         };
-
-        let Ok(mut image) = (match target {
-            Some(target) => cache.allocate_resampled(handle, target),
-            None => cache.allocate(handle),
+        let Ok(decoded) = (match resample {
+            Some(size) => cache.allocate_resampled(&image.handle, size),
+            None => cache.allocate(&image.handle),
         }) else {
             return;
         };
-
-        let width_scale = bounds.width / image.width() as f32;
-        let height_scale = bounds.height / image.height() as f32;
-        let quality = match filter_method {
+        let center = bounds.center();
+        let transform = tiny_skia::Transform::from_scale(
+            bounds.width / decoded.width() as f32,
+            bounds.height / decoded.height() as f32,
+        )
+        .post_translate(bounds.x - left as f32, bounds.y - top as f32)
+        .post_rotate_at(
+            -f32::from(image.rotation).to_degrees(),
+            center.x - left as f32,
+            center.y - top as f32,
+        );
+        let quality = match image.filter_method {
             raster::FilterMethod::Linear => tiny_skia::FilterQuality::Bilinear,
             raster::FilterMethod::Nearest => tiny_skia::FilterQuality::Nearest,
         };
-        let mut scratch;
-
-        // Round the borders if a border radius is defined
-        if border_radius.iter().any(|&corner| corner != 0.0) {
-            scratch = image.to_owned();
-            round(&mut scratch.as_mut(), {
-                let [a, b, c, d] = border_radius;
-                let scale_by = width_scale.min(height_scale);
-                let max_radius = image.width().min(image.height()) / 2;
-                [
-                    ((a / scale_by) as u32).max(1).min(max_radius),
-                    ((b / scale_by) as u32).max(1).min(max_radius),
-                    ((c / scale_by) as u32).max(1).min(max_radius),
-                    ((d / scale_by) as u32).max(1).min(max_radius),
-                ]
-            });
-            image = scratch.as_ref();
-        }
-
-        let transform = transform.pre_scale(width_scale, height_scale);
-
-        let quality = match filter_method {
-            raster::FilterMethod::Linear => tiny_skia::FilterQuality::Bilinear,
-            raster::FilterMethod::Nearest => tiny_skia::FilterQuality::Nearest,
-        };
-
-        pixels.draw_pixmap(
-            (bounds.x / width_scale) as i32,
-            (bounds.y / height_scale) as i32,
-            image,
-            &tiny_skia::PixmapPaint {
-                quality,
-                opacity,
+        let shader = tiny_skia::Pattern::new(
+            decoded,
+            tiny_skia::SpreadMode::Pad,
+            quality,
+            image.opacity,
+            transform,
+        );
+        target.fill_rect(
+            tiny_skia::Rect::from_xywh(
+                0.0,
+                0.0,
+                target.width() as f32,
+                target.height() as f32,
+            )
+            .expect("valid raster region"),
+            &tiny_skia::Paint {
+                shader,
+                anti_alias: false,
                 ..Default::default()
             },
-            transform,
-            clip_mask,
+            tiny_skia::Transform::identity(),
+            None,
         );
+
+        for (pixel, coverage) in
+            target.data_mut().chunks_exact_mut(4).zip(&mask.coverage)
+        {
+            for channel in pixel {
+                *channel =
+                    ((*channel as u32 * *coverage as u32 + 127) / 255) as u8;
+            }
+        }
+
+        pixels.draw_pixmap(
+            left as i32,
+            top as i32,
+            target.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            Some(clip_mask),
+        );
+    }
+
+    fn mask(&mut self, key: ClipKey) -> Arc<ClipMask> {
+        if let Some(index) = self.masks.iter().position(|mask| mask.key == key)
+        {
+            let mask = self.masks.remove(index).expect("cached clip mask");
+            self.masks.push_front(mask.clone());
+            return mask;
+        }
+
+        let bounds = Outline::new(
+            key.bounds,
+            [0.0; 4],
+            crate::core::border::Shape::Circular,
+        )
+        .expect("valid image clip");
+        let image = Outline::new(
+            key.image_bounds,
+            [0.0; 4],
+            crate::core::border::Shape::Circular,
+        )
+        .expect("valid image bounds");
+        let center = [
+            key.image_bounds[0] + key.image_bounds[2] * 0.5,
+            key.image_bounds[1] + key.image_bounds[3] * 0.5,
+        ];
+        let (sin, cos) = (key.rotation as f64).sin_cos();
+        let mut coverage =
+            Vec::with_capacity(key.size[0] as usize * key.size[1] as usize);
+
+        for y in 0..key.size[1] {
+            for x in 0..key.size[0] {
+                let point = [x as f64 + 0.5, y as f64 + 0.5];
+                let delta = [point[0] - center[0], point[1] - center[1]];
+                let unrotated = [
+                    delta[0] * cos - delta[1] * sin + center[0],
+                    delta[0] * sin + delta[1] * cos + center[1],
+                ];
+                let distance = bounds
+                    .signed_distance(point)
+                    .max(key.outline.signed_distance(point))
+                    .max(image.signed_distance(unrotated));
+                coverage.push((edge_coverage(distance) * 255.0).round() as u8);
+            }
+        }
+
+        let mask = Arc::new(ClipMask { key, coverage });
+        const BUDGET: usize = 16 * 1024 * 1024;
+
+        if mask.coverage.len() <= BUDGET {
+            while self.mask_bytes + mask.coverage.len() > BUDGET
+                || self.masks.len() >= 32
+            {
+                let old =
+                    self.masks.pop_back().expect("clip mask cache budget");
+                self.mask_bytes -= old.coverage.len();
+            }
+
+            self.mask_bytes += mask.coverage.len();
+            self.masks.push_front(mask.clone());
+        }
+
+        mask
     }
 
     pub fn trim_cache(&mut self) {
@@ -245,130 +371,17 @@ struct Entry {
     pixels: Vec<u32>,
 }
 
-// https://users.rust-lang.org/t/how-to-trim-image-to-circle-image-without-jaggy/70374/2
-fn round(img: &mut tiny_skia::PixmapMut<'_>, radius: [u32; 4]) {
-    let (width, height) = (img.width(), img.height());
-    assert!(radius[0] + radius[1] <= width);
-    assert!(radius[3] + radius[2] <= width);
-    assert!(radius[0] + radius[3] <= height);
-    assert!(radius[1] + radius[2] <= height);
-
-    // top left
-    border_radius(img, radius[0], |x, y| (x - 1, y - 1));
-    // top right
-    border_radius(img, radius[1], |x, y| (width - x, y - 1));
-    // bottom right
-    border_radius(img, radius[2], |x, y| (width - x, height - y));
-    // bottom left
-    border_radius(img, radius[3], |x, y| (x - 1, height - y));
+#[derive(Debug, Clone, PartialEq)]
+struct ClipKey {
+    outline: Outline,
+    bounds: [f64; 4],
+    size: [u32; 2],
+    image_bounds: [f64; 4],
+    rotation: f32,
 }
 
-fn border_radius(
-    img: &mut tiny_skia::PixmapMut<'_>,
-    r: u32,
-    coordinates: impl Fn(u32, u32) -> (u32, u32),
-) {
-    if r == 0 {
-        return;
-    }
-    let r0 = r;
-
-    // 16x antialiasing: 16x16 grid creates 256 possible shades, great for u8!
-    let r = 16 * r;
-
-    let mut x = 0;
-    let mut y = r - 1;
-    let mut p: i32 = 2 - r as i32;
-
-    // ...
-
-    let mut alpha: u16 = 0;
-    let mut skip_draw = true;
-
-    fn pixel_id(width: u32, (x, y): (u32, u32)) -> usize {
-        ((width as usize * y as usize) + x as usize) * 4
-    }
-
-    let clear_pixel = |img: &mut tiny_skia::PixmapMut<'_>,
-                       (x, y): (u32, u32)| {
-        let pixel = pixel_id(img.width(), (x, y));
-        img.data_mut()[pixel..pixel + 4].copy_from_slice(&[0; 4]);
-    };
-
-    let draw = |img: &mut tiny_skia::PixmapMut<'_>, alpha, x, y| {
-        debug_assert!((1..=256).contains(&alpha));
-        let pixel = pixel_id(img.width(), coordinates(r0 - x, r0 - y));
-        let pixel_alpha = &mut img.data_mut()[pixel + 3];
-        *pixel_alpha = ((alpha * *pixel_alpha as u16 + 128) / 256) as u8;
-    };
-
-    'l: loop {
-        // (comments for bottom_right case:)
-        // remove contents below current position
-        {
-            let i = x / 16;
-            for j in y / 16 + 1..r0 {
-                clear_pixel(img, coordinates(r0 - i, r0 - j));
-            }
-        }
-        // remove contents right of current position mirrored
-        {
-            let j = x / 16;
-            for i in y / 16 + 1..r0 {
-                clear_pixel(img, coordinates(r0 - i, r0 - j));
-            }
-        }
-
-        // draw when moving to next pixel in x-direction
-        if !skip_draw {
-            draw(img, alpha, x / 16 - 1, y / 16);
-            draw(img, alpha, y / 16, x / 16 - 1);
-            alpha = 0;
-        }
-
-        for _ in 0..16 {
-            skip_draw = false;
-
-            if x >= y {
-                break 'l;
-            }
-
-            alpha += y as u16 % 16 + 1;
-            if p < 0 {
-                x += 1;
-                p += (2 * x + 2) as i32;
-            } else {
-                // draw when moving to next pixel in y-direction
-                if y % 16 == 0 {
-                    draw(img, alpha, x / 16, y / 16);
-                    draw(img, alpha, y / 16, x / 16);
-                    skip_draw = true;
-                    alpha = (x + 1) as u16 % 16 * 16;
-                }
-
-                x += 1;
-                p -= (2 * (y - x) + 2) as i32;
-                y -= 1;
-            }
-        }
-    }
-
-    // one corner pixel left
-    if x / 16 == y / 16 {
-        // column under current position possibly not yet accounted
-        if x == y {
-            alpha += y as u16 % 16 + 1;
-        }
-        let s = y as u16 % 16 + 1;
-        let alpha = 2 * alpha - s * s;
-        draw(img, alpha, x / 16, y / 16);
-    }
-
-    // remove remaining square of content in the corner
-    let range = y / 16 + 1..r0;
-    for i in range.clone() {
-        for j in range.clone() {
-            clear_pixel(img, coordinates(r0 - i, r0 - j));
-        }
-    }
+#[derive(Debug)]
+struct ClipMask {
+    key: ClipKey,
+    coverage: Vec<u8>,
 }
