@@ -660,19 +660,20 @@ impl Engine {
             #[cfg(feature = "svg")]
             Image::Vector { svg, bounds, .. } => {
                 let physical_bounds = *bounds * _transformation;
+                let rotated_bounds = physical_bounds.rotate(svg.rotation);
 
-                if !_clip_bounds.intersects(&physical_bounds) {
+                if !_clip_bounds.intersects(&rotated_bounds) {
                     return;
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&_clip_bounds))
+                let clip_mask = (!rotated_bounds.is_within(&_clip_bounds))
                     .then_some(_clip_mask as &_);
 
                 let center = physical_bounds.center();
                 let radians = f32::from(svg.rotation);
 
                 let transform = tiny_skia::Transform::default().post_rotate_at(
-                    radians.to_degrees(),
+                    -radians.to_degrees(),
                     center.x,
                     center.y,
                 );

@@ -224,3 +224,118 @@ fn check_images(
         }
     }
 }
+
+#[cfg(feature = "svg")]
+#[test]
+#[ignore = "requires a GPU or software Vulkan adapter"]
+fn svg_rotation_agrees_between_backends() {
+    use iced_wgpu::core::svg::{self, Renderer as _};
+
+    futures::executor::block_on(async {
+        let mut gpu = <iced_wgpu::Renderer as Headless>::new(
+            Font::default(),
+            Pixels(16.0),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut cpu =
+            iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
+        let handle = svg::Handle::from_memory(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><path fill="red" d="M0 0H40V20H0Z"/><path fill="lime" d="M40 0H80V20H40Z"/><path fill="blue" d="M0 20H40V40H0Z"/><path fill="white" d="M40 20H80V40H40Z"/></svg>"#.as_slice()
+        );
+
+        for scale in [1.0, 1.25, 1.5] {
+            for rotation in [-0.61f32, 0.0, 0.37] {
+                let viewport = Rectangle::with_size(Size::new(120.0, 100.0));
+                let bounds = Rectangle {
+                    x: 20.0,
+                    y: 30.0,
+                    width: 80.0,
+                    height: 40.0,
+                };
+                let clip = Rectangle {
+                    x: 32.0,
+                    y: 20.0,
+                    width: 70.0,
+                    height: 65.0,
+                };
+                let image = svg::Svg::new(handle.clone()).rotation(rotation);
+                gpu.reset(viewport);
+                cpu.reset(viewport);
+                gpu.draw_svg(image.clone(), bounds, clip);
+                cpu.draw_svg(image, bounds, clip);
+                let size =
+                    Size::new((120.0 * scale) as u32, (100.0 * scale) as u32);
+                let gp = Headless::screenshot(
+                    &mut gpu,
+                    size,
+                    scale,
+                    Color::TRANSPARENT,
+                );
+                let cp = Headless::screenshot(
+                    &mut cpu,
+                    size,
+                    scale,
+                    Color::TRANSPARENT,
+                );
+                let (sin, cos) = rotation.sin_cos();
+                let center = bounds.center();
+                let mut checked = 0;
+
+                for y in 0..size.height {
+                    for x in 0..size.width {
+                        let p = [
+                            (x as f32 + 0.5) / scale,
+                            (y as f32 + 0.5) / scale,
+                        ];
+                        let dx = p[0] - center.x;
+                        let dy = p[1] - center.y;
+                        let source = [
+                            dx * cos - dy * sin + center.x,
+                            dx * sin + dy * cos + center.y,
+                        ];
+                        // Compare interior texels independently of the edge filters.
+                        if p[0] < clip.x + 2.0
+                            || p[0] > clip.x + clip.width - 2.0
+                            || p[1] < clip.y + 2.0
+                            || p[1] > clip.y + clip.height - 2.0
+                            || source[0] < bounds.x + 2.0
+                            || source[0] > bounds.x + bounds.width - 2.0
+                            || source[1] < bounds.y + 2.0
+                            || source[1] > bounds.y + bounds.height - 2.0
+                            || (source[0] - center.x).abs() < 2.0
+                            || (source[1] - center.y).abs() < 2.0
+                        {
+                            continue;
+                        }
+
+                        let expected = match (
+                            source[0] < center.x,
+                            source[1] < center.y,
+                        ) {
+                            (true, true) => [255, 0, 0, 255],
+                            (false, true) => [0, 255, 0, 255],
+                            (true, false) => [0, 0, 255, 255],
+                            (false, false) => [255; 4],
+                        };
+                        let index = ((y * size.width + x) * 4) as usize;
+                        assert_eq!(
+                            &gp[index..index + 4],
+                            &expected,
+                            "GPU rotation={rotation} p={p:?}"
+                        );
+                        assert_eq!(
+                            &cp[index..index + 4],
+                            &expected,
+                            "software rotation={rotation} p={p:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+
+                assert!(checked > 500);
+            }
+        }
+    });
+}
