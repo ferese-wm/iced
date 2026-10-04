@@ -138,6 +138,7 @@ impl Renderer {
                             &layer.clips.shapes[..=index],
                             Size::new(pixels.width(), pixels.height()),
                             scale_factor,
+                            damage_bounds,
                         )
                         .expect("shaped layer allocation");
                     groups.push(group);
@@ -146,17 +147,31 @@ impl Renderer {
 
                 let width = pixels.width();
                 let height = pixels.height();
-                let mut target = if let Some(group) = groups.last_mut() {
-                    group.pixmap.as_mut()
+                let (mut target, clip_mask, origin) = if let Some(group) =
+                    groups.last_mut()
+                {
+                    (group.pixmap.as_mut(), &mut group.clip_mask, group.origin)
                 } else {
-                    tiny_skia::PixmapMut::from_bytes(
-                        pixels.data_mut(),
-                        width,
-                        height,
+                    (
+                        tiny_skia::PixmapMut::from_bytes(
+                            pixels.data_mut(),
+                            width,
+                            height,
+                        )
+                        .expect("valid destination pixels"),
+                        &mut *clip_mask,
+                        core::Vector::ZERO,
                     )
-                    .expect("valid destination pixels")
                 };
                 let pixels = &mut target;
+                let layer_bounds = Rectangle {
+                    x: layer_bounds.x - origin.x,
+                    y: layer_bounds.y - origin.y,
+                    ..layer_bounds
+                };
+                let transformation =
+                    Transformation::translate(-origin.x, -origin.y)
+                        * Transformation::scale(scale_factor);
 
                 engine::adjust_clip_mask(clip_mask, layer_bounds);
 
@@ -166,7 +181,7 @@ impl Renderer {
                         self.engine.draw_quad(
                             quad,
                             background,
-                            Transformation::scale(scale_factor),
+                            transformation,
                             pixels,
                             clip_mask,
                             layer_bounds,
@@ -180,7 +195,7 @@ impl Renderer {
 
                     for group in &layer.primitives {
                         let Some(group_bounds) = (group.clip_bounds()
-                            * scale_factor)
+                            * transformation)
                             .intersection(&layer_bounds)
                         else {
                             continue;
@@ -191,8 +206,7 @@ impl Renderer {
                         for primitive in group.as_slice() {
                             self.engine.draw_primitive(
                                 primitive,
-                                Transformation::scale(scale_factor)
-                                    * group.transformation(),
+                                transformation * group.transformation(),
                                 pixels,
                                 clip_mask,
                                 group_bounds,
@@ -211,7 +225,7 @@ impl Renderer {
                     for image in &layer.images {
                         self.engine.draw_image(
                             image,
-                            Transformation::scale(scale_factor),
+                            transformation,
                             pixels,
                             clip_mask,
                             layer_bounds,
@@ -228,11 +242,11 @@ impl Renderer {
                         for text in group.as_slice() {
                             self.engine.draw_text(
                                 text,
-                                Transformation::scale(scale_factor)
-                                    * group.transformation(),
+                                transformation * group.transformation(),
                                 pixels,
                                 clip_mask,
                                 layer_bounds,
+                                origin,
                             );
                         }
                     }

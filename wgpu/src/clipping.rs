@@ -1,12 +1,22 @@
 use crate::core::{Size, shape};
 use crate::graphics::layer::ShapedClip;
 use bytemuck::{Pod, Zeroable};
+use std::{cell::RefCell, collections::VecDeque};
 use wgpu::util::DeviceExt;
+
+const MASK_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const COLOR_POOL_BYTES: u64 = 32 * 1024 * 1024;
+
+struct CachedMask {
+    clips: Vec<ShapedClip>,
+    scale: f32,
+    view: wgpu::TextureView,
+}
 
 #[derive(Clone)]
 pub(crate) struct Target {
     pub color: wgpu::TextureView,
-    pub mask: wgpu::TextureView,
+    pub mask: RefCell<Option<wgpu::TextureView>>,
 }
 
 pub(crate) struct Pipeline {
@@ -14,7 +24,8 @@ pub(crate) struct Pipeline {
     composite_pipeline: wgpu::RenderPipeline,
     targets: Vec<Target>,
     size: Size<u32>,
-    mask_keys: Vec<Option<(Vec<ShapedClip>, f32)>>,
+    masks: VecDeque<CachedMask>,
+    color_bytes: u64,
 }
 
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -67,7 +78,7 @@ impl Pipeline {
             &mask_shader,
             "mask_vs",
             "mask_fs",
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::R8Unorm,
             wgpu::BlendState {
                 color: blend,
                 alpha: blend,
@@ -86,7 +97,8 @@ impl Pipeline {
             composite_pipeline,
             targets: Vec::new(),
             size: Size::new(0, 0),
-            mask_keys: Vec::new(),
+            masks: VecDeque::new(),
+            color_bytes: 0,
         }
     }
 
@@ -99,17 +111,21 @@ impl Pipeline {
     ) -> Vec<Target> {
         if self.size != size {
             self.targets.clear();
-            self.mask_keys.clear();
+            self.masks.clear();
             self.size = size;
         }
 
         while self.targets.len() < depth {
             let color = texture(device, format, size);
-            let mask = texture(device, wgpu::TextureFormat::Rgba8Unorm, size);
-            self.targets.push(Target { color, mask });
-            self.mask_keys.push(None);
+            self.targets.push(Target {
+                color,
+                mask: RefCell::new(None),
+            });
         }
 
+        self.color_bytes = u64::from(size.width)
+            * u64::from(size.height)
+            * u64::from(format.block_copy_size(None).unwrap_or(16));
         self.targets[..depth].to_vec()
     }
 
@@ -118,7 +134,6 @@ impl Pipeline {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         target: &Target,
-        depth: usize,
         clips: &[ShapedClip],
         scale: f32,
     ) {
@@ -127,15 +142,28 @@ impl Pipeline {
             &target.color,
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
-        if self.mask_keys[depth].as_ref().is_some_and(
-            |(previous, previous_scale)| {
-                previous == clips && *previous_scale == scale
-            },
-        ) {
+        // Group IDs identify painter-order scopes, not mask geometry. Keep
+        // sibling masks in an LRU instead of overwriting one slot per depth.
+        let clips: Vec<_> = clips
+            .iter()
+            .cloned()
+            .map(|mut clip| {
+                clip.id = 0;
+                clip
+            })
+            .collect();
+        if let Some(index) = self
+            .masks
+            .iter()
+            .position(|mask| mask.clips == clips && mask.scale == scale)
+        {
+            let mask = self.masks.remove(index).expect("cached clip mask");
+            *target.mask.borrow_mut() = Some(mask.view.clone());
+            self.masks.push_front(mask);
             return;
         }
-
-        self.mask_keys[depth] = Some((clips.to_vec(), scale));
+        let mask = texture(device, wgpu::TextureFormat::R8Unorm, self.size);
+        *target.mask.borrow_mut() = Some(mask.clone());
         let mut first = true;
 
         for batch in clips.chunks(16) {
@@ -176,7 +204,7 @@ impl Pipeline {
             });
             let mut pass = begin_pass(
                 encoder,
-                &target.mask,
+                &mask,
                 if first {
                     wgpu::LoadOp::Clear(wgpu::Color::WHITE)
                 } else {
@@ -188,6 +216,30 @@ impl Pipeline {
             pass.draw(0..3, 0..1);
             first = false;
         }
+        let bytes = u64::from(self.size.width) * u64::from(self.size.height);
+        if bytes > 0 && bytes <= MASK_CACHE_BYTES {
+            while (self.masks.len() as u64 + 1) * bytes > MASK_CACHE_BYTES
+                || self.masks.len() >= 32
+            {
+                let _ = self.masks.pop_back();
+            }
+            self.masks.push_front(CachedMask {
+                clips,
+                scale,
+                view: mask,
+            });
+        }
+    }
+
+    pub(crate) fn trim(&mut self, depth: usize) {
+        // Active command buffers own their texture references. Bound only the
+        // reusable pool; deep frames must not retain their peak allocations.
+        let retained = if self.color_bytes == 0 {
+            0
+        } else {
+            (COLOR_POOL_BYTES / self.color_bytes) as usize
+        };
+        self.targets.truncate(depth.min(retained));
     }
 
     pub(crate) fn composite(
@@ -198,6 +250,13 @@ impl Pipeline {
         parent: Option<&Target>,
         destination: &wgpu::TextureView,
     ) {
+        let source_mask = source.mask.borrow();
+        let source_mask = source_mask.as_ref().expect("begun group mask");
+        let parent_mask = parent.map(|parent| parent.mask.borrow());
+        let parent_mask = parent_mask
+            .as_ref()
+            .and_then(|mask| mask.as_ref())
+            .unwrap_or(source_mask);
         let nested = [parent.is_some() as u32, 0, 0, 0];
         let buffer =
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -215,13 +274,11 @@ impl Pipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&source.mask),
+                    resource: wgpu::BindingResource::TextureView(source_mask),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(
-                        &parent.unwrap_or(source).mask,
-                    ),
+                    resource: wgpu::BindingResource::TextureView(parent_mask),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -316,4 +373,108 @@ fn pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Rectangle;
+
+    #[test]
+    #[ignore = "requires a GPU or software Vulkan adapter"]
+    fn sibling_masks_reuse_geometry_and_retained_targets_obey_budget() {
+        futures::executor::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .unwrap();
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor::default())
+                .await
+                .unwrap();
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let mut pipeline = Pipeline::new(&device, format);
+            let size = Size::new(1024, 1024);
+            let targets = pipeline.targets(&device, format, size, 12);
+            let mut encoder =
+                device.create_command_encoder(&Default::default());
+            let clip = |x, id| ShapedClip {
+                id,
+                local_border: None,
+                bounds: Rectangle::INFINITE,
+                outline: shape::Outline::new(
+                    [x, 10.0, 100.0, 60.0],
+                    [12.0; 4],
+                    shape::Shape::Continuous,
+                ),
+            };
+            pipeline.begin(
+                &device,
+                &mut encoder,
+                &targets[0],
+                &[clip(10.0, 1)],
+                1.0,
+            );
+            let first = targets[0].mask.borrow().clone().unwrap();
+            pipeline.begin(
+                &device,
+                &mut encoder,
+                &targets[0],
+                &[clip(200.0, 2)],
+                1.0,
+            );
+            let sibling = targets[0].mask.borrow().clone().unwrap();
+            assert_ne!(first, sibling);
+            pipeline.begin(
+                &device,
+                &mut encoder,
+                &targets[0],
+                &[clip(10.0, 99)],
+                1.0,
+            );
+            assert_eq!(targets[0].mask.borrow().as_ref(), Some(&first));
+            pipeline.begin(
+                &device,
+                &mut encoder,
+                &targets[0],
+                &[clip(200.0, 100)],
+                1.0,
+            );
+            assert_eq!(targets[0].mask.borrow().as_ref(), Some(&sibling));
+            assert_eq!(pipeline.masks.len(), 2);
+            pipeline.begin(
+                &device,
+                &mut encoder,
+                &targets[0],
+                &[clip(10.0, 1)],
+                1.25,
+            );
+            assert_ne!(targets[0].mask.borrow().as_ref(), Some(&first));
+            for i in 0..40 {
+                pipeline.begin(
+                    &device,
+                    &mut encoder,
+                    &targets[0],
+                    &[clip(i as f64, i)],
+                    1.0,
+                );
+            }
+            assert!(
+                pipeline.masks.len() as u64 * 1024 * 1024 <= MASK_CACHE_BYTES
+            );
+            pipeline.trim(12);
+            assert_eq!(pipeline.targets.len(), 8);
+            assert!(
+                pipeline.targets.len() as u64 * pipeline.color_bytes
+                    <= COLOR_POOL_BYTES
+            );
+            let _ = queue.submit([encoder.finish()]);
+            drop(targets);
+            let _ = pipeline.targets(&device, format, Size::new(100, 100), 1);
+            assert!(pipeline.masks.is_empty());
+            pipeline.trim(0);
+            assert!(pipeline.targets.is_empty());
+        });
+    }
 }

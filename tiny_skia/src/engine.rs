@@ -357,6 +357,7 @@ impl Engine {
         pixels: &mut tiny_skia::PixmapMut<'_>,
         clip_mask: &mut tiny_skia::Mask,
         clip_bounds: Rectangle,
+        origin: crate::core::Vector,
     ) {
         match text {
             Text::Paragraph {
@@ -397,6 +398,7 @@ impl Engine {
                     pixels,
                     clip_mask,
                     transformation,
+                    origin,
                 );
             }
             Text::Editor {
@@ -436,6 +438,7 @@ impl Engine {
                     pixels,
                     clip_mask,
                     transformation,
+                    origin,
                 );
             }
             Text::Cached {
@@ -478,6 +481,7 @@ impl Engine {
                     pixels,
                     clip_mask,
                     transformation,
+                    origin,
                 );
             }
             Text::Raw {
@@ -513,6 +517,7 @@ impl Engine {
                     pixels,
                     clip_mask,
                     transformation,
+                    origin,
                 );
             }
         }

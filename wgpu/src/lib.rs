@@ -548,7 +548,6 @@ impl Renderer {
                         &self.engine.device,
                         encoder,
                         &targets[index],
-                        index,
                         &layer.clips.shapes[..=index],
                         scale_factor as f32,
                     );
@@ -758,6 +757,10 @@ impl Renderer {
                     destination,
                 );
             let _ = active.pop();
+        }
+
+        if let Some(pipeline) = &mut self.clipping {
+            pipeline.trim(depth);
         }
 
         debug::layers_rendered(|| {

@@ -78,6 +78,69 @@ impl Pipeline {
             return;
         }
 
+        // Pixel-aligned rectangular images need neither a contour mask nor
+        // an intermediate pixmap. Fractional edges retain the coverage path.
+        if plain_image(image, bounds, outline, clip_bounds) {
+            let Some(region) = bounds
+                .intersection(&clip_bounds)
+                .and_then(|r| r.intersection(&damage_bounds))
+            else {
+                return;
+            };
+            let mut cache = self.cache.borrow_mut();
+            let resample = {
+                let Ok(decoded) = cache.allocate(&image.handle) else {
+                    return;
+                };
+                graphics::image::downsample_target(
+                    Size::new(decoded.width(), decoded.height()),
+                    bounds.size(),
+                )
+            };
+            let Ok(decoded) = (match resample {
+                Some(size) => cache.allocate_resampled(&image.handle, size),
+                None => cache.allocate(&image.handle),
+            }) else {
+                return;
+            };
+            let transform = tiny_skia::Transform::from_scale(
+                bounds.width / decoded.width() as f32,
+                bounds.height / decoded.height() as f32,
+            )
+            .post_translate(bounds.x, bounds.y);
+            let quality = match image.filter_method {
+                raster::FilterMethod::Linear => {
+                    tiny_skia::FilterQuality::Bilinear
+                }
+                raster::FilterMethod::Nearest => {
+                    tiny_skia::FilterQuality::Nearest
+                }
+            };
+            pixels.fill_rect(
+                tiny_skia::Rect::from_xywh(
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                )
+                .unwrap(),
+                &tiny_skia::Paint {
+                    shader: tiny_skia::Pattern::new(
+                        decoded,
+                        tiny_skia::SpreadMode::Pad,
+                        quality,
+                        image.opacity,
+                        transform,
+                    ),
+                    anti_alias: false,
+                    ..Default::default()
+                },
+                tiny_skia::Transform::identity(),
+                Some(clip_mask),
+            );
+            return;
+        }
+
         let Some(region) = clip_bounds
             .expand(1.0)
             .intersection(&damage_bounds)
@@ -269,6 +332,31 @@ impl Pipeline {
     }
 }
 
+fn plain_image(
+    image: &raster::Image,
+    bounds: Rectangle,
+    outline: Outline,
+    clip: Rectangle,
+) -> bool {
+    f32::from(image.rotation) == 0.0
+        && outline.radii() == [0.0; 4]
+        && outline.inset_distance() == 0.0
+        && outline.bounds()
+            == [bounds.x, bounds.y, bounds.width, bounds.height].map(f64::from)
+        && [
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            clip.x,
+            clip.y,
+            clip.width,
+            clip.height,
+        ]
+        .into_iter()
+        .all(|v| v.fract() == 0.0)
+}
+
 #[derive(Debug, Default)]
 struct Cache {
     entries: FxHashMap<raster::Id, Option<Entry>>,
@@ -407,4 +495,134 @@ struct ClipKey {
 struct ClipMask {
     key: ClipKey,
     coverage: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::shape::Shape;
+
+    #[test]
+    fn rectangular_fast_path_matches_masked_sampling_and_blending() {
+        let mut pipeline = Pipeline::new();
+        let data: Vec<u8> = (0..16 * 12)
+            .flat_map(|i| [i as u8, (i * 3) as u8, 91, (i * 7) as u8])
+            .collect();
+        let handle = raster::Handle::from_rgba(16, 12, data);
+        for filter in
+            [raster::FilterMethod::Linear, raster::FilterMethod::Nearest]
+        {
+            for opacity in [0.3, 1.0] {
+                for bounds in [
+                    Rectangle {
+                        x: 4.0,
+                        y: 3.0,
+                        width: 32.0,
+                        height: 24.0,
+                    },
+                    Rectangle {
+                        x: 4.0,
+                        y: 3.0,
+                        width: 8.0,
+                        height: 6.0,
+                    },
+                ] {
+                    let image = raster::Image::new(handle.clone())
+                        .filter_method(filter)
+                        .opacity(opacity);
+                    let outline = Outline::new(
+                        [bounds.x, bounds.y, bounds.width, bounds.height]
+                            .map(f64::from),
+                        [0.0; 4],
+                        Shape::Circular,
+                    )
+                    .unwrap();
+                    assert!(plain_image(&image, bounds, outline, bounds));
+                    let reference = Outline::new(
+                        [
+                            bounds.x as f64 - 1.0,
+                            bounds.y as f64 - 1.0,
+                            bounds.width as f64 + 2.0,
+                            bounds.height as f64 + 2.0,
+                        ],
+                        [0.0; 4],
+                        Shape::Circular,
+                    )
+                    .unwrap();
+                    let mut fast = tiny_skia::Pixmap::new(48, 36).unwrap();
+                    fast.fill(tiny_skia::Color::from_rgba8(17, 31, 47, 200));
+                    let mut masked = fast.clone();
+                    let damage = Rectangle {
+                        x: 6.0,
+                        y: 5.0,
+                        width: 25.0,
+                        height: 18.0,
+                    };
+                    let mut mask = tiny_skia::Mask::new(48, 36).unwrap();
+                    crate::engine::adjust_clip_mask(&mut mask, damage);
+                    pipeline.draw(
+                        &image,
+                        bounds,
+                        outline,
+                        bounds,
+                        &mut fast.as_mut(),
+                        &mask,
+                        damage,
+                    );
+                    pipeline.draw(
+                        &image,
+                        bounds,
+                        reference,
+                        bounds,
+                        &mut masked.as_mut(),
+                        &mask,
+                        damage,
+                    );
+                    for (a, b) in fast.data().iter().zip(masked.data()) {
+                        assert!(
+                            a.abs_diff(*b) <= 1,
+                            "filter={filter:?} opacity={opacity} {a} != {b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_rounded_rotated_and_inset_images_keep_coverage_path() {
+        let bounds = Rectangle {
+            x: 4.0,
+            y: 3.0,
+            width: 32.0,
+            height: 24.0,
+        };
+        let image =
+            raster::Image::new(raster::Handle::from_rgba(1, 1, vec![255; 4]));
+        let outline =
+            Outline::new([4.0, 3.0, 32.0, 24.0], [0.0; 4], Shape::Circular)
+                .unwrap();
+        assert!(!plain_image(
+            &image,
+            bounds,
+            outline.inset(1.0).unwrap(),
+            bounds
+        ));
+        let rounded =
+            Outline::new(outline.bounds(), [4.0; 4], Shape::Continuous)
+                .unwrap();
+        assert!(!plain_image(&image, bounds, rounded, bounds));
+        assert!(!plain_image(
+            &image,
+            Rectangle { x: 4.25, ..bounds },
+            outline,
+            bounds
+        ));
+        assert!(!plain_image(
+            &image.rotation(crate::core::Radians(0.1)),
+            bounds,
+            outline,
+            bounds
+        ));
+    }
 }

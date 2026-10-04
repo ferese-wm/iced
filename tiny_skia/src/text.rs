@@ -44,6 +44,7 @@ impl Pipeline {
         pixels: &mut tiny_skia::PixmapMut<'_>,
         clip_mask: Option<&tiny_skia::Mask>,
         transformation: Transformation,
+        origin: crate::core::Vector,
     ) {
         let Some(paragraph) = paragraph.upgrade() else {
             return;
@@ -60,6 +61,7 @@ impl Pipeline {
             pixels,
             clip_mask,
             transformation,
+            origin,
         );
     }
 
@@ -71,6 +73,7 @@ impl Pipeline {
         pixels: &mut tiny_skia::PixmapMut<'_>,
         clip_mask: Option<&tiny_skia::Mask>,
         transformation: Transformation,
+        origin: crate::core::Vector,
     ) {
         let Some(editor) = editor.upgrade() else {
             return;
@@ -87,6 +90,7 @@ impl Pipeline {
             pixels,
             clip_mask,
             transformation,
+            origin,
         );
     }
 
@@ -104,6 +108,7 @@ impl Pipeline {
         pixels: &mut tiny_skia::PixmapMut<'_>,
         clip_mask: Option<&tiny_skia::Mask>,
         transformation: Transformation,
+        origin: crate::core::Vector,
     ) {
         let line_height = f32::from(line_height);
 
@@ -148,6 +153,7 @@ impl Pipeline {
             pixels,
             clip_mask,
             transformation,
+            origin,
         );
     }
 
@@ -159,6 +165,7 @@ impl Pipeline {
         pixels: &mut tiny_skia::PixmapMut<'_>,
         clip_mask: Option<&tiny_skia::Mask>,
         transformation: Transformation,
+        origin: crate::core::Vector,
     ) {
         let mut font_system = font_system().write().expect("Write font system");
 
@@ -171,6 +178,7 @@ impl Pipeline {
             pixels,
             clip_mask,
             transformation,
+            origin,
         );
     }
 
@@ -189,8 +197,11 @@ fn draw(
     pixels: &mut tiny_skia::PixmapMut<'_>,
     clip_mask: Option<&tiny_skia::Mask>,
     transformation: Transformation,
+    origin: crate::core::Vector,
 ) {
-    let position = position * transformation;
+    // Hint glyphs in surface coordinates: truncation of a negative local
+    // baseline is not invariant under an integer crop translation.
+    let position = position * transformation + origin;
 
     let mut swash = cosmic_text::SwashCache::new();
 
@@ -220,19 +231,43 @@ fn draw(
                         .map(|c| c.a() as f32 / 255.0)
                         .unwrap_or(1.0);
 
-                pixels.draw_pixmap(
-                    physical_glyph.x + placement.left,
-                    physical_glyph.y - placement.top
-                        + (run.line_y * transformation.scale_factor()).round()
-                            as i32,
-                    pixmap,
-                    &tiny_skia::PixmapPaint {
-                        opacity,
-                        ..tiny_skia::PixmapPaint::default()
-                    },
-                    tiny_skia::Transform::identity(),
-                    clip_mask,
-                );
+                let x = physical_glyph.x + placement.left - origin.x as i32;
+                let y = physical_glyph.y - placement.top - origin.y as i32
+                    + (run.line_y * transformation.scale_factor()).round()
+                        as i32;
+                // Clip before tiny-skia rounds rectangle origins. Its integer
+                // sprite path rounds negative origins toward zero.
+                let left = x.max(0);
+                let top = y.max(0);
+                let right =
+                    (x + placement.width as i32).min(pixels.width() as i32);
+                let bottom =
+                    (y + placement.height as i32).min(pixels.height() as i32);
+                if let Some(rect) = tiny_skia::Rect::from_ltrb(
+                    left as f32,
+                    top as f32,
+                    right as f32,
+                    bottom as f32,
+                ) {
+                    pixels.fill_rect(
+                        rect,
+                        &tiny_skia::Paint {
+                            shader: tiny_skia::Pattern::new(
+                                pixmap,
+                                tiny_skia::SpreadMode::Pad,
+                                tiny_skia::FilterQuality::Nearest,
+                                opacity,
+                                tiny_skia::Transform::from_translate(
+                                    x as f32, y as f32,
+                                ),
+                            ),
+                            anti_alias: false,
+                            ..Default::default()
+                        },
+                        tiny_skia::Transform::identity(),
+                        clip_mask,
+                    );
+                }
             }
         }
     }
