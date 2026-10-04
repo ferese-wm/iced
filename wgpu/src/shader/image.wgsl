@@ -19,6 +19,10 @@ struct VertexInput {
     @location(7) atlas_scale: vec2<f32>,
     @location(8) layer: i32,
     @location(9) snap: u32,
+    @location(10) outline_bounds: vec4<f32>,
+    @location(11) outline_inset: f32,
+    @location(12) shape_and_contour: vec2<u32>,
+    @location(13) image_bounds: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -29,6 +33,12 @@ struct VertexOutput {
     @location(3) @interpolate(flat) layer: i32,
     @location(4) @interpolate(flat) opacity: f32,
     @location(5) uv: vec2<f32>,
+    @location(6) @interpolate(flat) outline_bounds: vec4<f32>,
+    @location(7) @interpolate(flat) outline_inset: f32,
+    @location(8) @interpolate(flat) shape_and_contour: vec2<u32>,
+    @location(9) @interpolate(flat) image_bounds: vec4<f32>,
+    @location(10) unrotated: vec2<f32>,
+    @location(11) @interpolate(flat) tile: vec4<f32>,
 }
 
 @vertex
@@ -69,8 +79,9 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let rotated_bounds = vec4<f32>(min_xy, max_xy - min_xy);
 
     // Intersect with clip bounds
-    let clip_min = max(rotated_bounds.xy, input.clip_bounds.xy);
-    let clip_max = min(rotated_bounds.xy + rotated_bounds.zw, input.clip_bounds.xy + input.clip_bounds.zw);
+    let margin = select(0.0, 0.5 / globals.scale_factor, input.shape_and_contour.y != 0u);
+    let clip_min = max(rotated_bounds.xy - margin, input.clip_bounds.xy - margin);
+    let clip_max = min(rotated_bounds.xy + rotated_bounds.zw + margin, input.clip_bounds.xy + input.clip_bounds.zw + margin);
     let clipped_tile = vec4<f32>(clip_min, max(vec2<f32>(0.0), clip_max - clip_min));
 
     // Calculate the vertex position
@@ -78,12 +89,14 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.position = vec4(vec2(globals.scale_factor), 1.0, 1.0) * vec4<f32>(v_pos, 0.0, 1.0);
     out.clip_bounds = globals.scale_factor * input.clip_bounds;
 
-    // Calculate rotated UV
-    let uv = input.atlas_pos + (v_pos - tile.xy) / tile.zw * input.atlas_scale;
-    let uv_center = input.atlas_pos + input.atlas_scale / 2.0;
-
-    let d = uv - uv_center;
-    out.uv = vec2<f32>(d.x * cos_r - d.y * sin_r, d.x * sin_r + d.y * cos_r) + uv_center;
+    // Rotate in destination coordinates before converting to atlas UVs.
+    // Rotating UV coordinates directly distorts non-square images and tiles.
+    let delta = v_pos - center;
+    let unrotated = vec2(delta.x * cos_r + delta.y * sin_r, -delta.x * sin_r + delta.y * cos_r) + center;
+    out.uv = input.atlas_pos + (unrotated - tile.xy) / tile.zw * input.atlas_scale;
+    out.unrotated = unrotated * globals.scale_factor;
+    out.image_bounds = input.image_bounds * globals.scale_factor;
+    out.tile = tile * globals.scale_factor;
 
     // Snap position to the pixel grid
     if bool(input.snap) {
@@ -96,6 +109,14 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
     out.position = globals.transform * out.position;
     out.border_radius = globals.scale_factor * min(input.border_radius, vec4(min(input.clip_bounds.z, input.clip_bounds.w) / 2.0));
+    out.outline_bounds = input.outline_bounds * globals.scale_factor;
+    out.outline_inset = input.outline_inset * globals.scale_factor;
+    out.shape_and_contour = input.shape_and_contour;
+
+    if input.shape_and_contour.y != 0u {
+        out.border_radius = input.border_radius * globals.scale_factor;
+    }
+
     out.atlas = vec4(input.atlas_pos, input.atlas_pos + input.atlas_scale);
     out.layer = input.layer;
     out.opacity = input.opacity;
@@ -115,10 +136,28 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         input.border_radius * 2.0,
     ) / 2.0;
 
-    let antialias: f32 = clamp(1.0 - d, 0.0, 1.0);
-    let inside = all(input.uv >= input.atlas.xy) && all(input.uv <= input.atlas.zw);
+    var antialias = clamp(1.0 - d, 0.0, 1.0);
 
-    return textureSample(u_texture, u_sampler, input.uv, input.layer) * vec4<f32>(1.0, 1.0, 1.0, antialias * input.opacity * f32(inside));
+    if input.shape_and_contour.y != 0u {
+        let contour_distance = shape_distance(fragment, input.outline_bounds, input.border_radius, input.shape_and_contour.x, input.outline_inset);
+        let clip_distance = shape_distance(fragment, input.clip_bounds, vec4(0.0), 0u, 0.0);
+        let image_distance = shape_distance(input.unrotated, input.image_bounds, vec4(0.0), 0u, 0.0);
+        antialias = shape_coverage(max(max(contour_distance, clip_distance), image_distance));
+    }
+    var inside = all(input.uv >= input.atlas.xy) && all(input.uv <= input.atlas.zw);
+    var uv = input.uv;
+
+    if input.shape_and_contour.y != 0u {
+        let lower = input.uv >= input.atlas.xy;
+        let upper = input.uv <= input.atlas.zw;
+        let external_lower = abs(input.tile.xy - input.image_bounds.xy) < vec2(0.001);
+        let external_upper = abs(input.tile.xy + input.tile.zw - input.image_bounds.xy - input.image_bounds.zw) < vec2(0.001);
+        inside = all(lower | external_lower) && all(upper | external_upper);
+        let half_texel = vec2(0.5) / vec2<f32>(textureDimensions(u_texture));
+        uv = clamp(uv, input.atlas.xy + half_texel, input.atlas.zw - half_texel);
+    }
+
+    return textureSample(u_texture, u_sampler, uv, input.layer) * vec4<f32>(1.0, 1.0, 1.0, antialias * input.opacity * f32(inside));
 }
 
 fn rounded_box_sdf(p: vec2<f32>, size: vec2<f32>, corners: vec4<f32>) -> f32 {

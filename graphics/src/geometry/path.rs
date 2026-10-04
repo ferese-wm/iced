@@ -58,6 +58,15 @@ impl Path {
         Self::new(|p| p.rounded_rectangle(top_left, size, radius))
     }
 
+    /// Creates a path from a reference outline and its accumulated inset.
+    /// Tolerance uses logical units; divide a physical-pixel tolerance by scale.
+    /// Returns `None` if sampling fails or coordinates cannot be represented.
+    pub fn outline(outline: border::Outline, tolerance: f64) -> Option<Self> {
+        let mut builder = Builder::new();
+        builder.outline(outline, tolerance)?;
+        Some(builder.build())
+    }
+
     /// Creates a new [`Path`] representing a circle given its center
     /// coordinate and its radius.
     pub fn circle(center: Point, radius: f32) -> Self {

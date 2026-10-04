@@ -13,6 +13,50 @@ pub trait Renderer {
     /// Starts recording a new layer.
     fn start_layer(&mut self, bounds: Rectangle);
 
+    /// Starts an opt-in layer masked by a reference outline.
+    /// A rounded background alone does not clip child content.
+    fn start_shaped_layer(
+        &mut self,
+        bounds: Rectangle,
+        outline: crate::border::Outline,
+    );
+
+    /// Starts a layer clipped to a quad's contour after transforms and pixel snapping.
+    /// `inset` is measured from the outer contour in logical pixels.
+    fn start_border_layer(
+        &mut self,
+        bounds: Rectangle,
+        border: Border,
+        snap: bool,
+        inset: f32,
+    );
+
+    /// Draws child content through a quad's resolved contour.
+    fn with_border_layer(
+        &mut self,
+        bounds: Rectangle,
+        border: Border,
+        snap: bool,
+        inset: f32,
+        f: impl FnOnce(&mut Self),
+    ) {
+        self.start_border_layer(bounds, border, snap, inset);
+        f(self);
+        self.end_layer();
+    }
+
+    /// Draws child content through a reference contour, including its inset.
+    fn with_shaped_layer(
+        &mut self,
+        bounds: Rectangle,
+        outline: crate::border::Outline,
+        f: impl FnOnce(&mut Self),
+    ) {
+        self.start_shaped_layer(bounds, outline);
+        f(self);
+        self.end_layer();
+    }
+
     /// Ends recording a new layer.
     ///
     /// The new layer will clip its contents to the provided `bounds`.
@@ -88,6 +132,11 @@ pub struct Quad {
 
     /// Whether the [`Quad`] should be snapped to the pixel grid.
     pub snap: bool,
+
+    /// Uses the shared signed-distance contour for circular corners too.
+    /// Enable when pairing the quad with shaped border clipping.
+    /// Otherwise ordinary circular quads retain their legacy rendering path.
+    pub use_contour: bool,
 }
 
 impl Default for Quad {
@@ -97,6 +146,7 @@ impl Default for Quad {
             border: Border::default(),
             shadow: Shadow::default(),
             snap: cfg!(feature = "crisp"),
+            use_contour: false,
         }
     }
 }

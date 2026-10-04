@@ -22,6 +22,7 @@
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(missing_docs)]
+mod clipping;
 pub mod layer;
 pub mod primitive;
 pub mod settings;
@@ -95,6 +96,7 @@ pub struct Renderer {
     image_cache: std::cell::RefCell<image::Cache>,
 
     staging_belt: wgpu::util::StagingBelt,
+    clipping: Option<clipping::Pipeline>,
 }
 
 impl Renderer {
@@ -131,6 +133,7 @@ impl Renderer {
             ),
 
             engine,
+            clipping: None,
         }
     }
 
@@ -315,7 +318,12 @@ impl Renderer {
         self.layers.merge();
 
         for layer in self.layers.iter() {
-            let clip_bounds = layer.bounds * scale_factor as f32;
+            let Some(clip_bounds) = layer
+                .clips
+                .physical_bounds(layer.bounds, scale_factor as f32)
+            else {
+                continue;
+            };
 
             if physical_bounds
                 .intersection(&clip_bounds)
@@ -408,7 +416,7 @@ impl Renderer {
                     &self.text_viewport,
                     encoder,
                     &layer.text,
-                    layer.bounds,
+                    clip_bounds * (1.0 / scale_factor as f32),
                     Transformation::scale(scale_factor as f32),
                 );
 
@@ -426,11 +434,33 @@ impl Renderer {
     ) {
         use std::mem::ManuallyDrop;
 
+        let depth = self
+            .layers
+            .iter()
+            .map(|layer| layer.clips.shapes.len())
+            .max()
+            .unwrap_or(0);
+        let targets = if depth == 0 {
+            Vec::new()
+        } else {
+            let pipeline = self.clipping.get_or_insert_with(|| {
+                clipping::Pipeline::new(&self.engine.device, self.engine.format)
+            });
+            pipeline.targets(
+                &self.engine.device,
+                self.engine.format,
+                viewport.physical_size(),
+                depth,
+            )
+        };
+        let mut active = Vec::<graphics::layer::ShapedClip>::new();
+        let mut current_frame = frame;
+
         let mut render_pass = ManuallyDrop::new(encoder.begin_render_pass(
             &wgpu::RenderPassDescriptor {
                 label: Some("iced_wgpu render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: frame,
+                    view: current_frame,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -474,8 +504,10 @@ impl Renderer {
         let scale = Transformation::scale(scale_factor as f32);
 
         for layer in self.layers.iter() {
-            let Some(physical_bounds) = physical_bounds
-                .intersection(&(layer.bounds * scale_factor as f32))
+            let Some(physical_bounds) = layer
+                .clips
+                .physical_bounds(layer.bounds, scale_factor as f32)
+                .and_then(|bounds| physical_bounds.intersection(&bounds))
             else {
                 continue;
             };
@@ -483,6 +515,55 @@ impl Renderer {
             let Some(scissor_rect) = physical_bounds.snap() else {
                 continue;
             };
+
+            let common = active
+                .iter()
+                .zip(&layer.clips.shapes)
+                .take_while(|(a, b)| a.id == b.id)
+                .count();
+
+            if common != active.len() || common != layer.clips.shapes.len() {
+                let _ = ManuallyDrop::into_inner(render_pass);
+                let pipeline =
+                    self.clipping.as_mut().expect("shaped clip pipeline");
+
+                while active.len() > common {
+                    let index = active.len() - 1;
+                    let parent =
+                        index.checked_sub(1).map(|index| &targets[index]);
+                    let destination =
+                        parent.map_or(frame, |target| &target.color);
+                    pipeline.composite(
+                        &self.engine.device,
+                        encoder,
+                        &targets[index],
+                        parent,
+                        destination,
+                    );
+                    let _ = active.pop();
+                }
+
+                for index in common..layer.clips.shapes.len() {
+                    pipeline.begin(
+                        &self.engine.device,
+                        encoder,
+                        &targets[index],
+                        &layer.clips.shapes[..=index],
+                        scale_factor as f32,
+                    );
+                    active.push(layer.clips.shapes[index].clone());
+                }
+
+                current_frame = active
+                    .len()
+                    .checked_sub(1)
+                    .map_or(frame, |index| &targets[index].color);
+                render_pass = ManuallyDrop::new(clipping::begin_pass(
+                    encoder,
+                    current_frame,
+                    wgpu::LoadOp::Load,
+                ));
+            }
 
             if !layer.quads.is_empty() {
                 let render_span = debug::render(debug::Primitive::Quad);
@@ -505,7 +586,7 @@ impl Renderer {
                 mesh_layer += self.triangle.render(
                     &self.engine.triangle_pipeline,
                     encoder,
-                    frame,
+                    current_frame,
                     mesh_layer,
                     &layer.triangles,
                     physical_bounds,
@@ -518,7 +599,7 @@ impl Renderer {
                         label: Some("iced_wgpu render pass"),
                         color_attachments: &[Some(
                             wgpu::RenderPassColorAttachment {
-                                view: frame,
+                                view: current_frame,
                                 depth_slice: None,
                                 resolve_target: None,
                                 ops: wgpu::Operations {
@@ -602,7 +683,7 @@ impl Renderer {
                         instance.primitive.render(
                             &primitive_storage,
                             encoder,
-                            frame,
+                            current_frame,
                             &clip_bounds,
                         );
                     }
@@ -612,7 +693,7 @@ impl Renderer {
                             label: Some("iced_wgpu render pass"),
                             color_attachments: &[Some(
                                 wgpu::RenderPassColorAttachment {
-                                    view: frame,
+                                    view: current_frame,
                                     depth_slice: None,
                                     resolve_target: None,
                                     ops: wgpu::Operations {
@@ -661,6 +742,26 @@ impl Renderer {
         }
 
         let _ = ManuallyDrop::into_inner(render_pass);
+
+        while let Some(index) = active.len().checked_sub(1) {
+            let parent = index.checked_sub(1).map(|index| &targets[index]);
+            let destination = parent.map_or(frame, |target| &target.color);
+            self.clipping
+                .as_ref()
+                .expect("shaped clip pipeline")
+                .composite(
+                    &self.engine.device,
+                    encoder,
+                    &targets[index],
+                    parent,
+                    destination,
+                );
+            let _ = active.pop();
+        }
+
+        if let Some(pipeline) = &mut self.clipping {
+            pipeline.trim(depth);
+        }
 
         debug::layers_rendered(|| {
             self.layers
@@ -724,6 +825,24 @@ impl Renderer {
 impl core::Renderer for Renderer {
     fn start_layer(&mut self, bounds: Rectangle) {
         self.layers.push_clip(bounds);
+    }
+
+    fn start_shaped_layer(
+        &mut self,
+        bounds: Rectangle,
+        outline: core::border::Outline,
+    ) {
+        self.layers.push_shaped_clip(bounds, outline);
+    }
+
+    fn start_border_layer(
+        &mut self,
+        bounds: Rectangle,
+        border: core::Border,
+        snap: bool,
+        inset: f32,
+    ) {
+        self.layers.push_border_clip(bounds, border, snap, inset);
     }
 
     fn end_layer(&mut self) {

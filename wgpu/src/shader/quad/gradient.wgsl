@@ -11,6 +11,11 @@ struct GradientVertexInput {
     @location(8) border_radius: vec4<f32>,
     @location(9) border_width: f32,
     @location(10) snap: u32,
+    @location(11) shadow_color: vec4<f32>,
+    @location(12) shadow_offset_and_blur: vec3<f32>,
+    @location(13) outline_bounds: vec4<f32>,
+    @location(14) outline_inset: f32,
+    @location(15) shape_and_contour: vec2<u32>,
 }
 
 struct GradientVertexOutput {
@@ -25,6 +30,11 @@ struct GradientVertexOutput {
     @location(8) border_color: vec4<f32>,
     @location(9) border_radius: vec4<f32>,
     @location(10) border_width: f32,
+    @location(0) shadow_color: vec4<f32>,
+    @location(11) shadow_offset_and_blur: vec3<f32>,
+    @location(12) outline_bounds: vec4<f32>,
+    @location(13) outline_inset: f32,
+    @location(14) @interpolate(flat) shape_and_contour: vec2<u32>,
 }
 
 @vertex
@@ -50,11 +60,25 @@ fn gradient_vs_main(input: GradientVertexInput) -> GradientVertexOutput {
         min(input.border_radius.w, min_border_radius)
     );
 
+    var vertex_pos = pos;
+    var vertex_scale = scale;
+
+    if input.shape_and_contour.y != 0u {
+        let offset = input.shadow_offset_and_blur.xy * globals.scale;
+        let blur = input.shadow_offset_and_blur.z * globals.scale;
+        vertex_pos += min(offset, vec2(0.0)) - blur;
+        vertex_scale += abs(offset) + 2.0 * blur;
+    }
+
+    if input.shape_and_contour.y != 0u {
+        border_radius = input.border_radius;
+    }
+
     var transform: mat4x4<f32> = mat4x4<f32>(
-        vec4<f32>(scale.x + scale_snap.x + 1.0, 0.0, 0.0, 0.0),
-        vec4<f32>(0.0, scale.y + scale_snap.y + 1.0, 0.0, 0.0),
+        vec4<f32>(vertex_scale.x + scale_snap.x + 1.0, 0.0, 0.0, 0.0),
+        vec4<f32>(0.0, vertex_scale.y + scale_snap.y + 1.0, 0.0, 0.0),
         vec4<f32>(0.0, 0.0, 1.0, 0.0),
-        vec4<f32>(pos + pos_snap - vec2<f32>(0.5, 0.5), 0.0, 1.0)
+        vec4<f32>(vertex_pos + pos_snap - vec2<f32>(0.5, 0.5), 0.0, 1.0)
     );
 
     out.position = globals.transform * transform * vec4<f32>(vertex_position(input.vertex_index), 0.0, 1.0);
@@ -67,7 +91,20 @@ fn gradient_vs_main(input: GradientVertexInput) -> GradientVertexOutput {
     out.position_and_scale = vec4<f32>(pos + pos_snap, scale + scale_snap);
     out.border_color = premultiply(input.border_color);
     out.border_radius = border_radius * globals.scale;
+
+    if input.shape_and_contour.y == 1u {
+        out.border_radius = min(out.border_radius, vec4(min(out.position_and_scale.z, out.position_and_scale.w) * 0.5));
+    }
     out.border_width = input.border_width * globals.scale;
+    out.shadow_color = premultiply(input.shadow_color);
+    out.shadow_offset_and_blur = input.shadow_offset_and_blur * globals.scale;
+    out.outline_bounds = input.outline_bounds * globals.scale;
+    out.outline_inset = input.outline_inset * globals.scale;
+    out.shape_and_contour = input.shape_and_contour;
+
+    if input.shape_and_contour.y == 1u {
+        out.outline_bounds = out.position_and_scale;
+    }
 
     return out;
 }
@@ -162,6 +199,15 @@ fn gradient_fs_main(input: GradientVertexOutput) -> @location(0) vec4<f32> {
     }
 
     var mixed_color: vec4<f32> = gradient(input.position.xy, input.direction, colors, offsets, last_index);
+
+    if input.shape_and_contour.y != 0u {
+        return contour_quad_color(
+            input.position.xy, input.position_and_scale, input.outline_bounds,
+            input.border_radius, input.shape_and_contour.x, input.outline_inset,
+            input.border_width, mixed_color, input.border_color, input.shadow_color,
+            input.shadow_offset_and_blur.xy, input.shadow_offset_and_blur.z,
+        );
+    }
 
     let pos = input.position_and_scale.xy;
     let scale = input.position_and_scale.zw;

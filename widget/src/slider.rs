@@ -616,6 +616,7 @@ where
                         radius: 0.0.into(),
                         width: 0.0,
                         color: Color::TRANSPARENT,
+                        ..Default::default()
                     },
                     ..renderer::Quad::default()
                 },
@@ -664,8 +665,17 @@ where
                 },
                 border: Border {
                     radius: handle_border_radius,
+                    shape: match style.handle.shape {
+                        HandleShape::Circle { .. } => {
+                            crate::core::border::Shape::Circular
+                        }
+                        HandleShape::Rectangle { .. } => {
+                            style.handle.corner_shape
+                        }
+                    },
                     width: style.handle.border_width,
                     color: style.handle.border_color,
+                    ..Default::default()
                 },
                 ..renderer::Quad::default()
             },
@@ -872,6 +882,8 @@ pub enum RailBackground {
 pub struct Handle {
     /// The shape of the handle.
     pub shape: HandleShape,
+    /// The corner profile for rectangular handles. Circular handles stay circular.
+    pub corner_shape: crate::core::border::Shape,
     /// The [`Background`] of the handle.
     pub background: Background,
     /// The border width of the handle.
@@ -944,10 +956,12 @@ pub fn default(theme: &Theme, status: Status) -> Style {
                 radius: 2.0.into(),
                 width: 0.0,
                 color: Color::TRANSPARENT,
+                ..Default::default()
             },
         },
         handle: Handle {
             shape: HandleShape::Circle { radius: 7.0 },
+            corner_shape: crate::core::border::Shape::Circular,
             background: color.into(),
             border_color: Color::TRANSPARENT,
             border_width: 0.0,

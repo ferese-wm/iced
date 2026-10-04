@@ -1,0 +1,507 @@
+use iced_wgpu::core::border::{Border, Outline, Radius, Shape};
+use iced_wgpu::core::renderer::{Headless, Quad};
+use iced_wgpu::core::shape::edge_coverage;
+use iced_wgpu::core::{
+    Background, Color, Font, Pixels, Rectangle, Renderer, Shadow, Size,
+    Transformation, Vector,
+};
+
+#[test]
+#[ignore = "requires a GPU or software Vulkan adapter"]
+fn fills_borders_shadows_and_reference_insets_match_distance_coverage() {
+    futures::executor::block_on(async {
+        let mut renderer = <iced_wgpu::Renderer as Headless>::new(
+            Font::default(),
+            Pixels(16.0),
+            None,
+        )
+        .await
+        .expect("GPU renderer");
+        check_quads(&mut renderer);
+        check_reference_card(&mut renderer);
+        check_post_snap_normalization(&mut renderer);
+    });
+}
+
+#[test]
+fn software_quads_match_distance_coverage() {
+    let mut renderer =
+        iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
+    check_quads(&mut renderer);
+    check_reference_card(&mut renderer);
+    check_post_snap_normalization(&mut renderer);
+}
+
+fn check_quads(renderer: &mut (impl Renderer + Headless)) {
+    for scale in [1.0, 1.25, 1.5] {
+        for local_scale in [1.0f32, 1.1] {
+            let translation = Vector::new(3.25, 2.75);
+            let transformation =
+                Transformation::translate(translation.x, translation.y)
+                    * Transformation::scale(local_scale);
+            for radii in [
+                [0.0; 4],
+                [0.375; 4],
+                [8.25; 4],
+                [22.0; 4],
+                [0.0, 16.0, 5.0, 10.0],
+            ] {
+                for width in [0.0, 0.75, 3.5, 30.0] {
+                    for (inset, gradient, use_reference, snap) in [
+                        (0.0, false, false, false),
+                        (0.0, false, false, true),
+                        (4.0, false, true, false),
+                        (4.0, false, true, true),
+                        (24.0, false, true, false),
+                        (4.0, true, true, false),
+                        (0.0, true, false, true),
+                    ] {
+                        renderer
+                            .reset(Rectangle::with_size(Size::new(90.0, 80.0)));
+                        let bounds = Rectangle {
+                            x: 13.25,
+                            y: 12.5,
+                            width: 56.0,
+                            height: 44.0,
+                        };
+                        let parent = Outline::new(
+                            [13.25, 12.5, 56.0, 44.0],
+                            radii.map(f64::from),
+                            Shape::Continuous,
+                        )
+                        .unwrap();
+                        let mut border = Border {
+                            radius: Radius::from(radii),
+                            width,
+                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.9),
+                            ..Default::default()
+                        }
+                        .shape(Shape::Continuous);
+
+                        if use_reference {
+                            border = border
+                                .rounded(0.0)
+                                .outline(parent.inset(inset).unwrap());
+                        }
+                        let quad = Quad {
+                            bounds,
+                            border,
+                            shadow: Shadow {
+                                color: Color::from_rgba(1.0, 1.0, 1.0, 0.4),
+                                offset: Vector::new(2.25, 3.5),
+                                blur_radius: 3.0,
+                            },
+                            snap,
+                            use_contour: false,
+                        };
+                        let fill = Color::from_rgba(1.0, 1.0, 1.0, 0.65);
+                        let background = if gradient {
+                            Background::Gradient(
+                                iced_wgpu::core::gradient::Linear::new(0.7)
+                                    .add_stop(0.0, fill)
+                                    .add_stop(1.0, fill)
+                                    .into(),
+                            )
+                        } else {
+                            Background::Color(fill)
+                        };
+                        renderer.with_transformation(
+                            transformation,
+                            |renderer| {
+                                renderer.fill_quad(quad, background);
+                            },
+                        );
+                        let size = Size::new(
+                            (90.0 * scale) as u32,
+                            (80.0 * scale) as u32,
+                        );
+                        let bytes = Headless::screenshot(
+                            renderer,
+                            size,
+                            scale,
+                            Color::TRANSPARENT,
+                        );
+                        let mut reference = parent
+                            .inset(inset)
+                            .unwrap()
+                            .transformed(
+                                [translation.x as f64, translation.y as f64],
+                                local_scale as f64,
+                            )
+                            .unwrap()
+                            .transformed([0.0; 2], f64::from(scale))
+                            .unwrap();
+                        let own_bounds = quad.bounds * transformation;
+                        let mut physical_bounds = [
+                            own_bounds.x,
+                            own_bounds.y,
+                            own_bounds.width,
+                            own_bounds.height,
+                        ]
+                        .map(|v| f64::from(v * scale));
+
+                        if snap {
+                            let right = (physical_bounds[0]
+                                + physical_bounds[2]
+                                + 0.001)
+                                .round();
+                            let bottom = (physical_bounds[1]
+                                + physical_bounds[3]
+                                + 0.001)
+                                .round();
+                            physical_bounds[0] =
+                                (physical_bounds[0] + 0.001).round();
+                            physical_bounds[1] =
+                                (physical_bounds[1] + 0.001).round();
+                            physical_bounds[2] = right - physical_bounds[0];
+                            physical_bounds[3] = bottom - physical_bounds[1];
+
+                            if !use_reference {
+                                reference = Outline::new(
+                                    physical_bounds,
+                                    reference.radii(),
+                                    Shape::Continuous,
+                                )
+                                .unwrap();
+                            }
+                        }
+
+                        let bounds = Outline::new(
+                            physical_bounds,
+                            [0.0; 4],
+                            Shape::Circular,
+                        )
+                        .unwrap();
+                        for y in 0..size.height {
+                            for x in 0..size.width {
+                                let p = [x as f64 + 0.5, y as f64 + 0.5];
+                                let distance = bounds
+                                    .signed_distance(p)
+                                    .max(reference.signed_distance(p));
+                                let outer = edge_coverage(distance);
+                                let inner = edge_coverage(
+                                    distance
+                                        + f64::from(
+                                            width * local_scale * scale,
+                                        ),
+                                );
+                                let q = [
+                                    p[0] - f64::from(
+                                        2.25 * local_scale * scale,
+                                    ),
+                                    p[1] - f64::from(3.5 * local_scale * scale),
+                                ];
+                                let shadow_distance = bounds
+                                    .signed_distance(q)
+                                    .max(reference.signed_distance(q));
+                                let blur = f64::from(3.0 * local_scale * scale);
+                                let t = ((shadow_distance.max(0.0) + blur)
+                                    / (2.0 * blur))
+                                    .clamp(0.0, 1.0);
+                                let shadow = 1.0 - t * t * (3.0 - 2.0 * t);
+                                let expected = 0.65 * inner
+                                    + 0.9 * (outer - inner)
+                                    + 0.4 * shadow * (1.0 - outer);
+                                let actual = bytes
+                                    [((y * size.width + x) * 4 + 3) as usize]
+                                    as f64
+                                    / 255.0;
+                                assert!(
+                                    (actual - expected).abs() <= 2.0 / 255.0,
+                                    "scale={scale} radii={radii:?} width={width} inset={inset} p={p:?}: alpha={actual}, reference={expected}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn software_quad_regions_respect_hard_clipping() {
+    let mut renderer =
+        iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
+    let viewport = Rectangle::with_size(Size::new(90.0, 80.0));
+    let clip = Rectangle {
+        x: 20.0,
+        y: 16.0,
+        width: 40.0,
+        height: 44.0,
+    };
+    let parent =
+        Outline::new([13.25, 12.5, 56.0, 44.0], [12.0; 4], Shape::Continuous)
+            .unwrap();
+
+    for scale in [1.0f32, 1.25, 1.5] {
+        for inset in [0.0, 3.25, 24.0] {
+            let quad = Quad {
+                bounds: Rectangle {
+                    x: 13.25,
+                    y: 12.5,
+                    width: 56.0,
+                    height: 44.0,
+                },
+                border: Border {
+                    color: Color::from_rgba(0.7, 0.2, 0.1, 0.6),
+                    width: 1.25,
+                    ..Default::default()
+                }
+                .outline(parent.inset(inset).unwrap()),
+                shadow: Shadow {
+                    color: Color::from_rgba(0.1, 0.2, 0.7, 0.5),
+                    offset: Vector::new(2.25, 3.5),
+                    blur_radius: 4.0,
+                },
+                ..Default::default()
+            };
+            let background = Background::Gradient(
+                iced_wgpu::core::gradient::Linear::new(0.7)
+                    .add_stop(0.0, Color::from_rgba(0.2, 0.7, 0.3, 0.5))
+                    .add_stop(1.0, Color::from_rgba(0.8, 0.4, 0.1, 0.9))
+                    .into(),
+            );
+            let size = Size::new((90.0 * scale) as u32, (80.0 * scale) as u32);
+            renderer.reset(viewport);
+            renderer.fill_quad(quad, background);
+            let full = Headless::screenshot(
+                &mut renderer,
+                size,
+                scale,
+                Color::TRANSPARENT,
+            );
+            renderer.reset(viewport);
+            renderer.with_layer(clip, |renderer| {
+                renderer.fill_quad(quad, background)
+            });
+            let clipped = Headless::screenshot(
+                &mut renderer,
+                size,
+                scale,
+                Color::TRANSPARENT,
+            );
+
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    let index = ((y * size.width + x) * 4) as usize;
+                    let p = iced_wgpu::core::Point::new(
+                        (x as f32 + 0.5) / scale,
+                        (y as f32 + 0.5) / scale,
+                    );
+                    let expected = if clip.contains(p) {
+                        &full[index..index + 4]
+                    } else {
+                        &[0; 4]
+                    };
+                    assert_eq!(
+                        &clipped[index..index + 4],
+                        expected,
+                        "scale={scale} inset={inset} p={p:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn software_aligned_solid_rectangles_match_reference_masks() {
+    let mut renderer =
+        iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0));
+    let viewport = Rectangle::with_size(Size::new(90.0, 80.0));
+    let bounds = Rectangle {
+        x: 16.0,
+        y: 12.0,
+        width: 52.0,
+        height: 44.0,
+    };
+    let outline =
+        Outline::new([16.0, 12.0, 52.0, 44.0], [0.0; 4], Shape::Continuous)
+            .unwrap();
+
+    for scale in [1.0f32, 1.25, 1.5] {
+        for alpha in [0.0, 0.25, 0.5, 1.0] {
+            let size = Size::new((90.0 * scale) as u32, (80.0 * scale) as u32);
+            let background = Color::from_rgba(0.7, 0.3, 0.1, alpha);
+            let mut screenshots = Vec::new();
+
+            for reference in [false, true] {
+                renderer.reset(viewport);
+                let border = if reference {
+                    Border::default().outline(outline)
+                } else {
+                    Border::default().shape(Shape::Continuous)
+                };
+                renderer.fill_quad(
+                    Quad {
+                        bounds,
+                        border,
+                        snap: false,
+                        ..Default::default()
+                    },
+                    background,
+                );
+                screenshots.push(Headless::screenshot(
+                    &mut renderer,
+                    size,
+                    scale,
+                    Color::from_rgb(0.2, 0.3, 0.4),
+                ));
+            }
+
+            for (a, b) in screenshots[0].iter().zip(&screenshots[1]) {
+                assert!(
+                    a.abs_diff(*b) <= 1,
+                    "scale={scale} alpha={alpha}: fast={a} reference={b}"
+                );
+            }
+        }
+    }
+}
+
+fn check_reference_card(renderer: &mut (impl Renderer + Headless)) {
+    let bounds = Rectangle {
+        x: 13.25,
+        y: 12.5,
+        width: 56.0,
+        height: 44.0,
+    };
+    let outer =
+        Outline::new([13.25, 12.5, 56.0, 44.0], [12.0; 4], Shape::Continuous)
+            .unwrap();
+
+    for scale in [1.0f32, 1.25, 1.5] {
+        for inset in [0.0, 4.75, 24.0] {
+            renderer.reset(Rectangle::with_size(Size::new(90.0, 80.0)));
+            renderer.fill_quad(
+                Quad {
+                    bounds,
+                    border: Border {
+                        width: 1.25,
+                        color: Color::from_rgba(1.0, 1.0, 1.0, 0.9),
+                        ..Default::default()
+                    }
+                    .outline(outer),
+                    snap: false,
+                    ..Default::default()
+                },
+                Color::from_rgba(1.0, 1.0, 1.0, 0.35),
+            );
+            // The child keeps the parent's reference geometry. Its bounds
+            // need not match the parent's; no radius subtraction occurs.
+            if inset < 22.0 {
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle {
+                            x: bounds.x + inset as f32,
+                            y: bounds.y + inset as f32,
+                            width: bounds.width - 2.0 * inset as f32,
+                            height: bounds.height - 2.0 * inset as f32,
+                        },
+                        border: Border {
+                            width: 0.75,
+                            color: Color::from_rgba(1.0, 1.0, 1.0, 0.7),
+                            ..Default::default()
+                        }
+                        .outline(outer.inset(inset).unwrap()),
+                        snap: false,
+                        ..Default::default()
+                    },
+                    Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+                );
+            }
+            let size = Size::new((90.0 * scale) as u32, (80.0 * scale) as u32);
+            let pixels =
+                Headless::screenshot(renderer, size, scale, Color::TRANSPARENT);
+            let physical = outer.transformed([0.0; 2], scale as f64).unwrap();
+
+            for y in 0..size.height {
+                for x in 0..size.width {
+                    let distance = physical
+                        .signed_distance([x as f64 + 0.5, y as f64 + 0.5]);
+                    let a = edge_coverage(distance);
+                    let ai = edge_coverage(distance + 1.25 * scale as f64);
+                    let parent = ai * 0.35 + (a - ai) * 0.9;
+                    let b = edge_coverage(distance + inset * scale as f64);
+                    let bi =
+                        edge_coverage(distance + (inset + 0.75) * scale as f64);
+                    let child = bi * 0.6 + (b - bi) * 0.7;
+                    let expected = child + parent * (1.0 - child);
+                    let actual = pixels[((y * size.width + x) * 4 + 3) as usize]
+                        as f64
+                        / 255.0;
+                    assert!(
+                        (actual - expected).abs() <= 2.0 / 255.0,
+                        "card scale={scale} inset={inset} p=({x},{y}): alpha={actual} reference={expected}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn check_post_snap_normalization(renderer: &mut (impl Renderer + Headless)) {
+    let viewport = Rectangle::with_size(Size::new(40.0, 40.0));
+    let bounds = Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: 26.0,
+        height: 26.0,
+    };
+    let scale = 1.25f32;
+
+    for radius in [12.0f32, 13.0, 14.0, 40.0] {
+        for gradient in [false, true] {
+            renderer.reset(viewport);
+            let background = if gradient {
+                Background::Gradient(
+                    iced_wgpu::core::gradient::Linear::new(0.7)
+                        .add_stop(0.0, Color::WHITE)
+                        .add_stop(1.0, Color::WHITE)
+                        .into(),
+                )
+            } else {
+                Background::Color(Color::WHITE)
+            };
+            renderer.fill_quad(
+                Quad {
+                    bounds,
+                    border: Border::default()
+                        .rounded(radius)
+                        .shape(Shape::Continuous),
+                    snap: true,
+                    ..Default::default()
+                },
+                background,
+            );
+            let pixels = Headless::screenshot(
+                renderer,
+                Size::new(50, 50),
+                scale,
+                Color::TRANSPARENT,
+            );
+            let expected = Outline::new(
+                [0.0, 0.0, 33.0, 33.0],
+                [radius as f64 * scale as f64; 4],
+                Shape::Continuous,
+            )
+            .unwrap();
+
+            for y in 0..50 {
+                for x in 0..50 {
+                    let alpha =
+                        pixels[((y * 50 + x) * 4 + 3) as usize] as f64 / 255.0;
+                    let reference = edge_coverage(
+                        expected
+                            .signed_distance([x as f64 + 0.5, y as f64 + 0.5]),
+                    );
+                    assert!(
+                        (alpha - reference).abs() <= 2.0 / 255.0,
+                        "post-snap radius={radius} gradient={gradient} p=({x},{y}) alpha={alpha} reference={reference}"
+                    );
+                }
+            }
+        }
+    }
+}

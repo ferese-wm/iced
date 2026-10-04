@@ -76,6 +76,7 @@ pub struct Container<
     horizontal_alignment: alignment::Horizontal,
     vertical_alignment: alignment::Vertical,
     clip: bool,
+    shaped_clip: Option<Option<core::border::Outline>>,
     content: Element<'a, Message, Theme, Renderer>,
     class: Theme::Class<'a>,
 }
@@ -102,6 +103,7 @@ where
             horizontal_alignment: alignment::Horizontal::Left,
             vertical_alignment: alignment::Vertical::Top,
             clip: false,
+            shaped_clip: None,
             class: Theme::default(),
             content,
         }
@@ -208,6 +210,19 @@ where
     /// overflow.
     pub fn clip(mut self, clip: bool) -> Self {
         self.clip = clip;
+        self
+    }
+
+    /// Clips child content to the border's inner contour. The background and
+    /// border remain outside this group. Ordinary child widgets keep their shape.
+    pub fn clip_to_border(mut self, clip: bool) -> Self {
+        self.shaped_clip = clip.then_some(None);
+        self
+    }
+
+    /// Clips child content to an explicit reference outline, including its inset.
+    pub fn clip_outline(mut self, outline: core::border::Outline) -> Self {
+        self.shaped_clip = Some(Some(outline));
         self
     }
 
@@ -363,7 +378,25 @@ where
         let style = theme.style(&self.class);
 
         if let Some(clipped_viewport) = bounds.intersection(viewport) {
-            draw_background(renderer, &style, bounds);
+            draw_background_with_contour(
+                renderer,
+                &style,
+                bounds,
+                self.shaped_clip.is_some(),
+            );
+
+            if let Some(reference) = self.shaped_clip {
+                if let Some(outline) = reference {
+                    renderer.start_shaped_layer(bounds, outline);
+                } else {
+                    renderer.start_border_layer(
+                        bounds,
+                        style.border,
+                        style.snap,
+                        style.border.width.max(0.0),
+                    );
+                }
+            }
 
             self.content.as_widget().draw(
                 tree,
@@ -390,6 +423,10 @@ where
                     viewport
                 },
             );
+
+            if self.shaped_clip.is_some() {
+                renderer.end_layer();
+            }
         }
     }
 
@@ -507,6 +544,17 @@ pub fn draw_background<Renderer>(
 ) where
     Renderer: core::Renderer,
 {
+    draw_background_with_contour(renderer, style, bounds, false);
+}
+
+fn draw_background_with_contour<Renderer>(
+    renderer: &mut Renderer,
+    style: &Style,
+    bounds: Rectangle,
+    use_contour: bool,
+) where
+    Renderer: core::Renderer,
+{
     if style.background.is_some()
         || style.border.width > 0.0
         || style.shadow.color.a > 0.0
@@ -517,6 +565,7 @@ pub fn draw_background<Renderer>(
                 border: style.border,
                 shadow: style.shadow,
                 snap: style.snap,
+                use_contour,
             },
             style
                 .background
@@ -769,6 +818,7 @@ pub fn bordered_box(theme: &Theme) -> Style {
             width: 1.0,
             radius: 5.0.into(),
             color: palette.background.weak.color,
+            ..Default::default()
         },
         ..Style::default()
     }

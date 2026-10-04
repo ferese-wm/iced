@@ -26,6 +26,12 @@ pub struct Image<H = Handle> {
     /// Currently, this will only be applied to the `clip_bounds`.
     pub border_radius: border::Radius,
 
+    /// The profile of the clipping contour.
+    pub shape: border::Shape,
+
+    /// An original contour with an accumulated inset, in clip coordinates.
+    pub outline: Option<border::Outline>,
+
     /// The opacity of the image.
     ///
     /// 0 means transparent. 1 means opaque.
@@ -46,10 +52,26 @@ impl Image<Handle> {
             filter_method: FilterMethod::default(),
             rotation: Radians(0.0),
             border_radius: border::Radius::default(),
+            shape: border::Shape::Circular,
+            outline: None,
             opacity: 1.0,
             snap: false,
             // border_radius: [0.0; 4],
         }
+    }
+
+    /// Selects a profile and clears any reference outline.
+    pub fn shape(mut self, shape: border::Shape) -> Self {
+        self.shape = shape;
+        self.outline = None;
+        self
+    }
+
+    /// Uses an original contour and its accumulated inset for clipping.
+    pub fn outline(mut self, outline: border::Outline) -> Self {
+        self.shape = outline.shape();
+        self.outline = Some(outline);
+        self
     }
 
     /// Sets the filter method of the [`Image`].

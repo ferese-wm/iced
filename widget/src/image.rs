@@ -73,6 +73,8 @@ pub struct Image<'a, Handle = image::Handle> {
     height: Length,
     crop: Option<Rectangle<u32>>,
     border_radius: border::Radius,
+    shape: border::Shape,
+    outline: Option<border::Outline>,
     content_fit: ContentFit,
     filter_method: FilterMethod,
     rotation: Rotation,
@@ -104,6 +106,8 @@ impl<'a, Handle> Image<'a, Handle> {
             scale: 1.0,
             expand: false,
             border_radius: [0.0; 4].into(),
+            shape: border::Shape::Circular,
+            outline: None,
             _phantom_data: std::marker::PhantomData,
         }
     }
@@ -201,6 +205,20 @@ impl<'a, Handle> Image<'a, Handle> {
         self
     }
 
+    /// Selects a profile and clears any reference outline.
+    pub fn shape(mut self, shape: border::Shape) -> Self {
+        self.shape = shape;
+        self.outline = None;
+        self
+    }
+
+    /// Clips to the original contour and accumulated inset of an outline.
+    pub fn outline(mut self, outline: border::Outline) -> Self {
+        self.shape = outline.shape();
+        self.outline = Some(outline);
+        self
+    }
+
     #[cfg(feature = "a11y")]
     /// Sets the name of the [`Image`].
     pub fn name(mut self, name: impl Into<Cow<'a, str>>) -> Self {
@@ -294,7 +312,6 @@ fn drawing_bounds<Renderer, Handle>(
     rotation: Rotation,
     scale: f32,
     opacity: f32,
-    border_radius: [f32; 4],
 ) -> Rectangle
 where
     Renderer: image::Renderer<Handle = Handle>,
@@ -383,6 +400,39 @@ pub fn draw<Renderer, Handle>(
     Renderer: image::Renderer<Handle = Handle>,
     Handle: Clone,
 {
+    draw_with_outline(
+        renderer,
+        layout,
+        handle,
+        crop,
+        border_radius,
+        content_fit,
+        filter_method,
+        rotation,
+        opacity,
+        scale,
+        border::Shape::Circular,
+        None,
+    );
+}
+
+fn draw_with_outline<Renderer, Handle>(
+    renderer: &mut Renderer,
+    layout: Layout<'_>,
+    handle: &Handle,
+    crop: Option<Rectangle<u32>>,
+    border_radius: border::Radius,
+    content_fit: ContentFit,
+    filter_method: FilterMethod,
+    rotation: Rotation,
+    opacity: f32,
+    scale: f32,
+    shape: border::Shape,
+    outline: Option<border::Outline>,
+) where
+    Renderer: image::Renderer<Handle = Handle>,
+    Handle: Clone,
+{
     let bounds = layout.bounds();
     let drawing_bounds = drawing_bounds(
         renderer,
@@ -393,13 +443,14 @@ pub fn draw<Renderer, Handle>(
         rotation,
         scale,
         opacity,
-        border_radius.into(),
     );
 
     renderer.draw_image(
         image::Image {
             handle: handle.clone(),
             border_radius,
+            shape,
+            outline,
             filter_method,
             rotation: rotation.radians(),
             opacity,
@@ -453,7 +504,7 @@ where
         _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
-        draw(
+        draw_with_outline(
             renderer,
             layout,
             &self.handle,
@@ -464,6 +515,8 @@ where
             self.rotation,
             self.opacity,
             self.scale,
+            self.shape,
+            self.outline,
         );
     }
 

@@ -19,6 +19,7 @@ pub type Stack = layer::Stack<Layer>;
 #[derive(Debug)]
 pub struct Layer {
     pub bounds: Rectangle,
+    pub clips: layer::ClipState,
     pub quads: quad::Batch,
     pub triangles: triangle::Batch,
     pub primitives: primitive::Batch,
@@ -46,20 +47,67 @@ impl Layer {
         transformation: Transformation,
     ) {
         let bounds = quad.bounds * transformation;
+        let scale = transformation.scale_factor();
+        let translation = transformation.translation();
+        let Some(outline) =
+            quad.border.outline_for(quad.bounds).and_then(|outline| {
+                outline.transformed(
+                    [f64::from(translation.x), f64::from(translation.y)],
+                    f64::from(scale),
+                )
+            })
+        else {
+            return;
+        };
+        let outline_bounds = outline.bounds().map(|v| v as f32);
+        let outline_inset = outline.inset_distance() as f32;
+
+        if !outline_bounds
+            .into_iter()
+            .chain([outline_inset])
+            .all(f32::is_finite)
+        {
+            return;
+        }
+
+        let contour = if quad.border.outline.is_some() {
+            2
+        } else if quad.use_contour
+            || quad.border.shape == core::border::Shape::Continuous
+        {
+            1
+        } else {
+            0
+        };
 
         let quad = Quad {
             position: [bounds.x, bounds.y],
             size: [bounds.width, bounds.height],
             border_color: color::pack(quad.border.color),
-            border_radius: (quad.border.radius * transformation.scale_factor())
-                .into(),
-            border_width: quad.border.width * transformation.scale_factor(),
+            border_radius: if quad.border.outline.is_some() {
+                outline.radii().map(|v| v as f32)
+            } else {
+                <[f32; 4]>::from(quad.border.radius)
+                    .map(|r| (r * scale).max(0.0))
+            },
+            border_width: if contour == 0 {
+                quad.border.width * scale
+            } else {
+                (quad.border.width * scale).max(0.0)
+            },
             shadow_color: color::pack(quad.shadow.color),
             shadow_offset: (quad.shadow.offset * transformation.scale_factor())
                 .into(),
-            shadow_blur_radius: quad.shadow.blur_radius
-                * transformation.scale_factor(),
+            shadow_blur_radius: if contour == 0 {
+                quad.shadow.blur_radius * scale
+            } else {
+                (quad.shadow.blur_radius * scale).max(0.0)
+            },
             snap: quad.snap as u32,
+            outline_bounds,
+            outline_inset,
+            shape: outline.shape() as u32,
+            contour,
         };
 
         self.quads.add(quad, &background);
@@ -162,11 +210,23 @@ impl Layer {
 
     pub fn draw_raster(
         &mut self,
-        image: core::Image,
+        mut image: core::Image,
         bounds: Rectangle,
         clip_bounds: Rectangle,
         transformation: Transformation,
     ) {
+        if let Some(outline) = image.outline {
+            let scale = transformation.scale_factor();
+            let translation = transformation.translation();
+            let Some(outline) = outline.transformed(
+                [translation.x as f64, translation.y as f64],
+                scale as f64,
+            ) else {
+                return;
+            };
+            image.outline = Some(outline);
+        }
+
         let image = Image::Raster {
             image: core::Image {
                 border_radius: image.border_radius
@@ -312,6 +372,14 @@ impl graphics::Layer for Layer {
         self.bounds
     }
 
+    fn clips(&self) -> &layer::ClipState {
+        &self.clips
+    }
+
+    fn set_clips(&mut self, clips: layer::ClipState) {
+        self.clips = clips;
+    }
+
     fn flush(&mut self) {
         self.flush_meshes();
         self.flush_text();
@@ -323,6 +391,7 @@ impl graphics::Layer for Layer {
 
     fn reset(&mut self) {
         self.bounds = Rectangle::INFINITE;
+        self.clips = layer::ClipState::default();
 
         self.quads.clear();
         self.triangles.clear();
@@ -394,6 +463,7 @@ impl Default for Layer {
     fn default() -> Self {
         Self {
             bounds: Rectangle::INFINITE,
+            clips: layer::ClipState::default(),
             quads: quad::Batch::default(),
             triangles: triangle::Batch::default(),
             primitives: primitive::Batch::default(),
