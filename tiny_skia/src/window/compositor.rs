@@ -155,14 +155,24 @@ pub fn present(
 ) -> Result<(), compositor::SurfaceError> {
     let physical_size = viewport.physical_size();
 
+    if physical_size
+        != Size::new(surface.clip_mask.width(), surface.clip_mask.height())
+    {
+        return Err(compositor::SurfaceError::Outdated);
+    }
+
     let mut buffer = surface
         .window
         .buffer_mut()
         .map_err(|_| compositor::SurfaceError::Lost)?;
 
-    let last_layers = {
-        let age = buffer.age();
+    let age = buffer.age();
+    // Resizing transient Wayland surfaces can leave a frame with an older
+    // buffer. Let the window runtime reconfigure it before changing damage
+    // history or presenting any pixels.
+    let mut pixels = pixel_map(&mut buffer, physical_size)?;
 
+    let last_layers = {
         surface.max_age = surface.max_age.max(age);
         surface.layer_stack.truncate(surface.max_age as usize);
 
@@ -199,13 +209,6 @@ pub fn present(
             Rectangle::with_size(viewport.logical_size()),
         );
 
-        let mut pixels = tiny_skia::PixmapMut::from_bytes(
-            bytemuck::cast_slice_mut(&mut buffer),
-            physical_size.width,
-            physical_size.height,
-        )
-        .expect("Create pixel map");
-
         renderer.draw(
             &mut pixels,
             &mut surface.clip_mask,
@@ -217,6 +220,22 @@ pub fn present(
 
     on_pre_present();
     buffer.present().map_err(|_| compositor::SurfaceError::Lost)
+}
+
+fn pixel_map(
+    buffer: &mut [u32],
+    size: Size<u32>,
+) -> Result<tiny_skia::PixmapMut<'_>, compositor::SurfaceError> {
+    if buffer.len() as u64 != u64::from(size.width) * u64::from(size.height) {
+        return Err(compositor::SurfaceError::Outdated);
+    }
+
+    tiny_skia::PixmapMut::from_bytes(
+        bytemuck::cast_slice_mut(buffer),
+        size.width,
+        size.height,
+    )
+    .ok_or(compositor::SurfaceError::Outdated)
 }
 
 pub fn screenshot(
@@ -265,4 +284,35 @@ pub fn screenshot(
             acc
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outdated_buffers_request_reconfiguration_without_panicking() {
+        for (length, size) in [
+            (5, Size::new(3, 2)),
+            (7, Size::new(3, 2)),
+            (0, Size::new(0, 2)),
+            (0, Size::new(2, 0)),
+            (0, Size::new(u32::MAX, u32::MAX)),
+        ] {
+            let mut buffer = vec![0; length];
+            assert!(matches!(
+                pixel_map(&mut buffer, size),
+                Err(compositor::SurfaceError::Outdated)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_reconfigured_buffer_draws_directly_into_its_storage() {
+        let mut buffer = [0; 6];
+        assert!(pixel_map(&mut buffer[..5], Size::new(3, 2)).is_err());
+        let mut pixels = pixel_map(&mut buffer, Size::new(3, 2)).unwrap();
+        pixels.fill(tiny_skia::Color::WHITE);
+        assert!(buffer.iter().all(|pixel| *pixel == u32::MAX));
+    }
 }
