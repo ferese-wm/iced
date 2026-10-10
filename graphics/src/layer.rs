@@ -207,6 +207,7 @@ impl<T: Layer> Stack<T> {
     /// Pushes a new clipping region in the [`Stack`]; creating a new layer in the
     /// process.
     pub fn push_clip(&mut self, bounds: Rectangle) {
+        self.flush();
         let bounds = bounds * self.transformation();
         let mut clips = self.layers[self.current].clips().clone();
         clips.hard_bounds =
@@ -474,6 +475,7 @@ mod tests {
         bounds: Rectangle,
         clips: ClipState,
         marks: Vec<u8>,
+        pending: Vec<u8>,
     }
 
     impl Layer for Recorded {
@@ -492,7 +494,9 @@ mod tests {
         fn set_clips(&mut self, clips: ClipState) {
             self.clips = clips;
         }
-        fn flush(&mut self) {}
+        fn flush(&mut self) {
+            self.marks.append(&mut self.pending);
+        }
         fn resize(&mut self, bounds: Rectangle) {
             self.bounds = bounds;
         }
@@ -513,6 +517,37 @@ mod tests {
     fn outline() -> Outline {
         Outline::new([10.25, 9.5, 30.0, 25.0], [8.0; 4], Shape::Continuous)
             .unwrap()
+    }
+
+    #[test]
+    fn rectangular_clips_flush_pending_content_after_a_shaped_group() {
+        let bounds = Rectangle::with_size(Size::new(100.0, 90.0));
+        let mut stack = Stack::<Recorded>::new();
+        stack.reset(bounds);
+        stack.current_mut().0.pending.push(0);
+        stack.push_shaped_clip(bounds, outline());
+        stack.current_mut().0.pending.push(1);
+        stack.pop_clip();
+        // Text and meshes are deferred until the layer is flushed. A rectangular
+        // scroll or overlay clip must preserve them before leaving this layer.
+        stack.current_mut().0.pending.push(2);
+        stack.push_clip(bounds);
+        stack.current_mut().0.pending.push(3);
+        stack.push_clip(bounds);
+        stack.current_mut().0.pending.push(4);
+        stack.pop_clip();
+        stack.current_mut().0.pending.push(5);
+        stack.pop_clip();
+        stack.current_mut().0.pending.push(6);
+        stack.merge();
+        assert_eq!(
+            stack
+                .iter()
+                .flat_map(|layer| layer.marks.iter().copied())
+                .collect::<Vec<_>>(),
+            (0..7).collect::<Vec<_>>()
+        );
+        assert!(stack.iter().all(|layer| layer.pending.is_empty()));
     }
 
     #[test]
