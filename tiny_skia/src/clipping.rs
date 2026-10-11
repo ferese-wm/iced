@@ -106,6 +106,13 @@ impl Pipeline {
             } else {
                 0.0
             };
+            if relative == 1.0 {
+                continue;
+            }
+            if relative == 0.0 {
+                pixel.fill(0);
+                continue;
+            }
             for channel in pixel {
                 *channel = (*channel as f32 * relative).round() as u8;
             }
@@ -195,13 +202,43 @@ impl Pipeline {
             outlines.push((outline, rectangle));
         }
 
+        let interior = outlines.iter().try_fold(
+            [
+                region.x,
+                region.y,
+                region.x + region.width,
+                region.y + region.height,
+            ],
+            |[x0, y0, x1, y1], (outline, rectangle)| {
+                let [a, b, c, d] = crate::quad::full_coverage_bounds(
+                    *outline,
+                    rectangle.bounds(),
+                    [size.width, size.height],
+                    0.0,
+                )?;
+                let inside = [x0.max(a), y0.max(b), x1.min(c), y1.min(d)];
+                (inside[0] < inside[2] && inside[1] < inside[3])
+                    .then_some(inside)
+            },
+        );
+        let left = bounds.x.floor() as u32;
+        let right =
+            (bounds.x + bounds.width).ceil().min(size.width as f32) as u32;
         for y in (bounds.y.floor() as u32)
             ..((bounds.y + bounds.height).ceil().min(size.height as f32) as u32)
         {
-            for x in (bounds.x.floor() as u32)
-                ..((bounds.x + bounds.width).ceil().min(size.width as f32)
-                    as u32)
+            let ranges = if let Some([x0, y0, x1, y1]) = interior
+                && (y0..y1).contains(&y)
             {
+                let row = (y - region.y) as usize * region.width as usize;
+                coverage[row + (x0 - region.x) as usize
+                    ..row + (x1 - region.x) as usize]
+                    .fill(255);
+                [left..x0, x1..right]
+            } else {
+                [left..right, right..right]
+            };
+            for x in ranges.into_iter().flatten() {
                 let point = [x as f64 + 0.5, y as f64 + 0.5];
                 let distance = outlines
                     .iter()
@@ -396,5 +433,78 @@ mod tests {
                 .iter()
                 .all(|value| *value == 0)
         );
+    }
+
+    #[test]
+    fn filled_interiors_match_distance_masks_for_nested_fractional_clips() {
+        let size = Size::new(160, 120);
+        let region = Rectangle::with_size(size);
+        for shape in [Shape::Circular, Shape::Continuous] {
+            for scale in [1.0, 1.25] {
+                for inset in [-3.0, 0.0, 4.25, 60.0] {
+                    let outer = Outline::new(
+                        [3.25, 2.5, 148.0, 110.0],
+                        [12.0; 4],
+                        shape,
+                    )
+                    .unwrap();
+                    let inner = Outline::new(
+                        [16.5, 10.75, 128.0, 98.0],
+                        [0.0, 20.0, 4.0, 9.0],
+                        shape,
+                    )
+                    .unwrap()
+                    .inset(inset)
+                    .unwrap();
+                    let clips = [outer, inner].map(|outline| ShapedClip {
+                        id: 0,
+                        outline: Some(outline),
+                        local_border: None,
+                        bounds: Rectangle {
+                            x: 8.25,
+                            y: 4.5,
+                            width: 145.0,
+                            height: 105.0,
+                        },
+                    });
+                    let actual =
+                        Pipeline::default().mask(&clips, size, scale, region);
+                    for y in 0..size.height {
+                        for x in 0..size.width {
+                            let point = [x as f64 + 0.5, y as f64 + 0.5];
+                            let distance = clips
+                                .iter()
+                                .map(|clip| {
+                                    let (outline, bounds) =
+                                        clip.physical(scale, size).unwrap();
+                                    let rectangle = Outline::new(
+                                        [
+                                            bounds.x,
+                                            bounds.y,
+                                            bounds.width,
+                                            bounds.height,
+                                        ]
+                                        .map(f64::from),
+                                        [0.0; 4],
+                                        Shape::Circular,
+                                    )
+                                    .unwrap();
+                                    outline
+                                        .signed_distance(point)
+                                        .max(rectangle.signed_distance(point))
+                                })
+                                .fold(f64::NEG_INFINITY, f64::max);
+                            let expected =
+                                (edge_coverage(distance) * 255.0).round() as u8;
+                            assert_eq!(
+                                actual.coverage[(y * size.width + x) as usize],
+                                expected,
+                                "shape={shape:?} scale={scale} inset={inset} point={point:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -10,7 +10,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 const CACHE_BYTES: usize = 16 * 1024 * 1024;
-const CACHE_ENTRIES: usize = 32;
+// A large contour now occupies up to four perimeter entries.
+const CACHE_ENTRIES: usize = 32 * 4;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Key {
@@ -117,7 +118,14 @@ impl Pipeline {
                     ..Default::default()
                 },
                 tiny_skia::Transform::identity(),
-                Some(clip_mask),
+                clipping_mask(
+                    clip_mask,
+                    [bounds.x.max(0.0) as u32, bounds.y.max(0.0) as u32],
+                    [
+                        bounds.width.max(0.0) as u32,
+                        bounds.height.max(0.0) as u32,
+                    ],
+                ),
             );
             return;
         }
@@ -191,55 +199,101 @@ impl Pipeline {
             blur,
             shadow,
         };
-        let masks = self.masks(key);
-        let Some(mut fill) = tiny_skia::Pixmap::new(right - left, bottom - top)
-        else {
-            return;
-        };
-        let transform = tiny_skia::Transform::from_row(
-            scale,
-            0.0,
-            0.0,
-            scale,
-            translation.x - left as f32,
-            translation.y - top as f32,
-        );
-        let shader = match background {
-            Background::Color(color) => {
-                tiny_skia::Shader::SolidColor(into_color(*color))
-            }
-            Background::Gradient(Gradient::Linear(linear)) => {
-                let (start, end) = linear.angle.to_distance(&quad.bounds);
-                let mut stops = linear
-                    .stops
-                    .into_iter()
-                    .flatten()
-                    .map(|stop| {
-                        tiny_skia::GradientStop::new(
-                            stop.offset,
-                            into_color(stop.color),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                if stops.is_empty() {
-                    stops.push(tiny_skia::GradientStop::new(
-                        0.0,
-                        tiny_skia::Color::BLACK,
-                    ));
+        if let Some([x0, y0, x1, y1]) = interior(&key) {
+            // Interior coverage is exactly one. Only the perimeter needs
+            // distance masks and an intermediate RGBA image.
+            for [x, y, right, bottom] in [
+                [0, 0, key.size[0], y0],
+                [0, y1, key.size[0], key.size[1]],
+                [0, y0, x0, y1],
+                [x1, y0, key.size[0], y1],
+            ] {
+                if x == right || y == bottom {
+                    continue;
                 }
 
-                let Some(shader) = tiny_skia::LinearGradient::new(
-                    tiny_skia::Point::from_xy(start.x, start.y),
-                    tiny_skia::Point::from_xy(end.x, end.y),
-                    stops,
-                    tiny_skia::SpreadMode::Pad,
-                    transform,
-                ) else {
-                    return;
+                let Some(outline) =
+                    key.outline.transformed([-(x as f64), -(y as f64)], 1.0)
+                else {
+                    continue;
                 };
-                shader
+                let mut part = key.clone();
+                part.outline = outline;
+                part.bounds[0] -= x as f64;
+                part.bounds[1] -= y as f64;
+                part.size = [right - x, bottom - y];
+                self.draw_region(
+                    (quad, background),
+                    transformation,
+                    pixels,
+                    clip_mask,
+                    part,
+                    [left + x, top + y],
+                );
             }
+
+            if let Some(shader) = background_shader(
+                background,
+                quad.bounds,
+                transformation,
+                [0.0; 2],
+            ) {
+                pixels.fill_rect(
+                    tiny_skia::Rect::from_xywh(
+                        (left + x0) as f32,
+                        (top + y0) as f32,
+                        (x1 - x0) as f32,
+                        (y1 - y0) as f32,
+                    )
+                    .expect("nonempty interior"),
+                    &tiny_skia::Paint {
+                        shader,
+                        anti_alias: false,
+                        ..Default::default()
+                    },
+                    tiny_skia::Transform::identity(),
+                    clipping_mask(
+                        clip_mask,
+                        [left + x0, top + y0],
+                        [x1 - x0, y1 - y0],
+                    ),
+                );
+            }
+        } else {
+            self.draw_region(
+                (quad, background),
+                transformation,
+                pixels,
+                clip_mask,
+                key,
+                [left, top],
+            );
+        }
+    }
+
+    fn draw_region(
+        &mut self,
+        quad: (&Quad, &Background),
+        transformation: Transformation,
+        pixels: &mut tiny_skia::PixmapMut<'_>,
+        clip_mask: &tiny_skia::Mask,
+        key: Key,
+        origin: [u32; 2],
+    ) {
+        let (quad, background) = quad;
+        let [left, top] = origin;
+        let [width, height] = key.size;
+        let masks = self.masks(key);
+        let Some(mut fill) = tiny_skia::Pixmap::new(width, height) else {
+            return;
+        };
+        let Some(shader) = background_shader(
+            background,
+            quad.bounds,
+            transformation,
+            [left as f32, top as f32],
+        ) else {
+            return;
         };
         fill.fill_rect(
             tiny_skia::Rect::from_xywh(
@@ -450,6 +504,131 @@ impl Pipeline {
     }
 }
 
+fn interior(key: &Key) -> Option<[u32; 4]> {
+    let [x0, y0, x1, y1] =
+        full_coverage_bounds(key.outline, key.bounds, key.size, key.width)?;
+    (u64::from(x1 - x0) * u64::from(y1 - y0) >= 4096)
+        .then_some([x0, y0, x1, y1])
+}
+
+pub(crate) fn full_coverage_bounds(
+    outline: Outline,
+    bounds: [f64; 4],
+    size: [u32; 2],
+    border: f64,
+) -> Option<[u32; 4]> {
+    let [left, top, width, height] = outline.bounds();
+    let limit = width.min(height) * 0.5;
+    let extent = outline
+        .radii()
+        .into_iter()
+        .map(|radius| corner_extent(radius, limit, outline.shape()))
+        .fold(0.0f64, f64::max);
+    let margin = (border + 0.5 + outline.inset_distance()).max(0.0);
+    let [bx, by, bw, bh] = bounds;
+    let x0 = (left + extent + margin)
+        .max(bx + border + 0.5)
+        .ceil()
+        .max(0.0)
+        .min(size[0] as f64) as u32;
+    let y0 = (top + extent + margin)
+        .max(by + border + 0.5)
+        .ceil()
+        .max(0.0)
+        .min(size[1] as f64) as u32;
+    let x1 = (left + width - extent - margin)
+        .min(bx + bw - border - 0.5)
+        .floor()
+        .max(0.0)
+        .min(size[0] as f64) as u32;
+    let y1 = (top + height - extent - margin)
+        .min(by + bh - border - 0.5)
+        .floor()
+        .max(0.0)
+        .min(size[1] as f64) as u32;
+
+    (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
+}
+
+fn background_shader(
+    background: &Background,
+    bounds: Rectangle,
+    transformation: Transformation,
+    origin: [f32; 2],
+) -> Option<tiny_skia::Shader<'static>> {
+    match background {
+        Background::Color(color) => {
+            Some(tiny_skia::Shader::SolidColor(into_color(*color)))
+        }
+        Background::Gradient(Gradient::Linear(linear)) => {
+            let (start, end) = linear.angle.to_distance(&bounds);
+            let mut stops = linear
+                .stops
+                .into_iter()
+                .flatten()
+                .map(|stop| {
+                    tiny_skia::GradientStop::new(
+                        stop.offset,
+                        into_color(stop.color),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if stops.is_empty() {
+                stops.push(tiny_skia::GradientStop::new(
+                    0.0,
+                    tiny_skia::Color::BLACK,
+                ));
+            }
+            let scale = transformation.scale_factor();
+            let translation = transformation.translation();
+            tiny_skia::LinearGradient::new(
+                tiny_skia::Point::from_xy(start.x, start.y),
+                tiny_skia::Point::from_xy(end.x, end.y),
+                stops,
+                tiny_skia::SpreadMode::Pad,
+                tiny_skia::Transform::from_row(
+                    scale,
+                    0.0,
+                    0.0,
+                    scale,
+                    translation.x - origin[0],
+                    translation.y - origin[1],
+                ),
+            )
+        }
+    }
+}
+
+fn clipping_mask(
+    mask: &tiny_skia::Mask,
+    origin: [u32; 2],
+    size: [u32; 2],
+) -> Option<&tiny_skia::Mask> {
+    let [left, top] = origin;
+    let [width, height] = size;
+    let Some(right) = left.checked_add(width) else {
+        return Some(mask);
+    };
+    let Some(bottom) = top.checked_add(height) else {
+        return Some(mask);
+    };
+    if right > mask.width() || bottom > mask.height() {
+        return Some(mask);
+    }
+    let full = mask
+        .data()
+        .chunks_exact(mask.width() as usize)
+        .skip(top as usize)
+        .take(height as usize)
+        .all(|row| {
+            let mut chunks =
+                row[left as usize..right as usize].chunks_exact(64);
+            chunks.all(|chunk| chunk == [255; 64])
+                && chunks.remainder().iter().all(|alpha| *alpha == 255)
+        });
+    (!full).then_some(mask)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,7 +745,7 @@ mod tests {
     fn cache_has_an_entry_limit() {
         let mut pipeline = Pipeline::default();
 
-        for width in 0..64 {
+        for width in 0..CACHE_ENTRIES * 2 {
             let _ = pipeline.masks(Key {
                 width: width as f64,
                 ..key()
@@ -575,5 +754,186 @@ mod tests {
 
         assert_eq!(pipeline.cache.len(), CACHE_ENTRIES);
         assert!(pipeline.bytes <= CACHE_BYTES);
+    }
+
+    #[test]
+    fn tiled_interiors_match_full_surface_compositing() {
+        use crate::core::{Border, Color, Shadow, Vector, gradient};
+        let backgrounds = [
+            Background::Color(Color::from_rgba(0.2, 0.4, 0.8, 1.0)),
+            Background::Color(Color::from_rgba(0.2, 0.4, 0.8, 0.35)),
+            Background::Color(Color::TRANSPARENT),
+            Background::Gradient(
+                gradient::Linear::new(0.7)
+                    .add_stop(0.0, Color::from_rgba(0.8, 0.3, 0.1, 0.25))
+                    .add_stop(1.0, Color::from_rgba(0.1, 0.4, 0.7, 0.9))
+                    .into(),
+            ),
+        ];
+        for shape in [Shape::Circular, Shape::Continuous] {
+            for scale in [1.0, 1.25, 2.0] {
+                for inset in [-3.0, 0.0, 5.25] {
+                    for (width, shadow) in
+                        [(0.0, false), (0.75, true), (3.0, false)]
+                    {
+                        for background in backgrounds {
+                            let bounds = Rectangle {
+                                x: 12.25,
+                                y: 24.5,
+                                width: 270.0,
+                                height: 190.0,
+                            };
+                            let outline = Outline::new(
+                                [
+                                    bounds.x,
+                                    bounds.y,
+                                    bounds.width,
+                                    bounds.height,
+                                ]
+                                .map(f64::from),
+                                [0.0, 24.0, 8.5, 12.0],
+                                shape,
+                            )
+                            .unwrap()
+                            .inset(inset)
+                            .unwrap();
+                            let quad = Quad {
+                                bounds,
+                                border: Border {
+                                    width,
+                                    color: Color::from_rgba(0.8, 0.1, 0.3, 0.6),
+                                    outline: Some(outline),
+                                    shape,
+                                    ..Border::default()
+                                },
+                                shadow: Shadow {
+                                    color: if shadow {
+                                        Color::BLACK.scale_alpha(0.4)
+                                    } else {
+                                        Color::TRANSPARENT
+                                    },
+                                    offset: Vector::new(3.25, -5.5),
+                                    blur_radius: 6.0,
+                                },
+                                snap: false,
+                                ..Quad::default()
+                            };
+                            let transformation =
+                                Transformation::translate(2.5, 1.75)
+                                    * Transformation::scale(scale);
+                            let mut actual =
+                                tiny_skia::Pixmap::new(420, 300).unwrap();
+                            actual.fill(
+                                tiny_skia::Color::from_rgba(0.1, 0.5, 0.3, 0.7)
+                                    .unwrap(),
+                            );
+                            let mut expected = actual.clone();
+                            let mut clip =
+                                tiny_skia::Mask::new(420, 300).unwrap();
+                            for (index, alpha) in
+                                clip.data_mut().iter_mut().enumerate()
+                            {
+                                *alpha = if inset != 0.0 && index % 7 == 0 {
+                                    128
+                                } else {
+                                    255
+                                };
+                            }
+                            Pipeline::default().draw(
+                                &quad,
+                                &background,
+                                transformation,
+                                &mut actual.as_mut(),
+                                &clip,
+                                Rectangle {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 420.0,
+                                    height: 300.0,
+                                },
+                            );
+                            let bounds = bounds * transformation;
+                            let outline = outline
+                                .transformed([2.5, 1.75], scale as f64)
+                                .unwrap();
+                            Pipeline::default().draw_region(
+                                (&quad, &background),
+                                transformation,
+                                &mut expected.as_mut(),
+                                &clip,
+                                Key {
+                                    outline,
+                                    bounds: [
+                                        bounds.x,
+                                        bounds.y,
+                                        bounds.width,
+                                        bounds.height,
+                                    ]
+                                    .map(f64::from),
+                                    size: [420, 300],
+                                    width: f64::from(width * scale),
+                                    shadow_offset: [
+                                        3.25 * scale as f64,
+                                        -5.5 * scale as f64,
+                                    ],
+                                    blur: 6.0 * scale as f64,
+                                    shadow,
+                                },
+                                [0, 0],
+                            );
+                            let delta = actual
+                                .data()
+                                .iter()
+                                .zip(expected.data())
+                                .map(|(a, b)| a.abs_diff(*b))
+                                .max()
+                                .unwrap();
+                            assert!(
+                                delta <= 1,
+                                "delta={delta} shape={shape:?} scale={scale} inset={inset} width={width} shadow={shadow} background={background:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_panels_cache_only_the_perimeter() {
+        use crate::core::{Border, Color};
+        let quad = Quad {
+            bounds: Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 3840.0,
+                height: 2160.0,
+            },
+            border: Border {
+                radius: 12.0.into(),
+                shape: Shape::Continuous,
+                ..Border::default()
+            },
+            ..Quad::default()
+        };
+        let mut pixels = tiny_skia::Pixmap::new(3840, 2160).unwrap();
+        let mut clip = tiny_skia::Mask::new(3840, 2160).unwrap();
+        clip.data_mut().fill(255);
+        let mut pipeline = Pipeline::default();
+        pipeline.draw(
+            &quad,
+            &Background::Color(Color::WHITE),
+            Transformation::IDENTITY,
+            &mut pixels.as_mut(),
+            &clip,
+            quad.bounds,
+        );
+        assert_eq!(pipeline.cache.len(), 4);
+        assert!(
+            pipeline.bytes < 1024 * 1024,
+            "cached {} bytes",
+            pipeline.bytes
+        );
+        assert!(pixels.pixel(1920, 1080).unwrap().alpha() == 255);
     }
 }

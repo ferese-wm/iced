@@ -41,9 +41,30 @@ impl Engine {
         clip_mask: &mut tiny_skia::Mask,
         clip_bounds: Rectangle,
     ) {
+        let physical_bounds = quad.bounds * transformation;
+        let aligned_rectangle = quad.border.width <= 0.0
+            && <[f32; 4]>::from(quad.border.radius) == [0.0; 4]
+            && quad.shadow.color.a <= 0.0
+            && matches!(background, Background::Color(_))
+            && physical_bounds.x >= 0.0
+            && physical_bounds.y >= 0.0
+            && physical_bounds.x + physical_bounds.width
+                <= pixels.width() as f32
+            && physical_bounds.y + physical_bounds.height
+                <= pixels.height() as f32
+            && [
+                physical_bounds.x,
+                physical_bounds.y,
+                physical_bounds.width,
+                physical_bounds.height,
+            ]
+            .into_iter()
+            .all(|value| value.is_finite() && value.fract() == 0.0);
+
         if quad.use_contour
             || quad.border.shape == crate::core::border::Shape::Continuous
             || quad.border.outline.is_some()
+            || aligned_rectangle
         {
             self.quad_pipeline.draw(
                 quad,
@@ -55,8 +76,6 @@ impl Engine {
             );
             return;
         }
-
-        let physical_bounds = quad.bounds * transformation;
 
         if !clip_bounds.intersects(&physical_bounds) {
             return;
@@ -907,6 +926,32 @@ fn rounded_box_sdf(
 }
 
 pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
+    if [bounds.x, bounds.y, bounds.width, bounds.height]
+        .into_iter()
+        .all(|value| value.is_finite() && value.fract() == 0.0)
+        && bounds.width > 0.0
+        && bounds.height > 0.0
+    {
+        let width = clip_mask.width() as usize;
+        let height = clip_mask.height() as usize;
+        let left = bounds.x.max(0.0).min(width as f32) as usize;
+        let top = bounds.y.max(0.0).min(height as f32) as usize;
+        let right =
+            (bounds.x + bounds.width).max(0.0).min(width as f32) as usize;
+        let bottom =
+            (bounds.y + bounds.height).max(0.0).min(height as f32) as usize;
+        let data = clip_mask.data_mut();
+
+        data[..top * width].fill(0);
+        for row in data[top * width..bottom * width].chunks_exact_mut(width) {
+            row[..left].fill(0);
+            row[left..right].fill(255);
+            row[right..].fill(0);
+        }
+        data[bottom * width..].fill(0);
+        return;
+    }
+
     clip_mask.clear();
 
     let path = {
@@ -930,4 +975,123 @@ pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
         false,
         tiny_skia::Transform::default(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aligned_clip_masks_match_path_rasterization() {
+        for x in [-20.0, 0.0, 8.0, 60.0, 90.0] {
+            for y in [-20.0, 0.0, 10.0, 45.0, 70.0] {
+                for (width, height) in
+                    [(1.0, 1.0), (40.0, 30.0), (200.0, 150.0)]
+                {
+                    let bounds = Rectangle {
+                        x,
+                        y,
+                        width,
+                        height,
+                    };
+                    let mut actual = tiny_skia::Mask::new(80, 60).unwrap();
+                    actual.data_mut().fill(127);
+                    adjust_clip_mask(&mut actual, bounds);
+                    let mut expected = tiny_skia::Mask::new(80, 60).unwrap();
+                    let path = rounded_rectangle(bounds, [0.0; 4]);
+                    expected.fill_path(
+                        &path,
+                        tiny_skia::FillRule::EvenOdd,
+                        false,
+                        tiny_skia::Transform::identity(),
+                    );
+                    assert_eq!(actual.data(), expected.data(), "{bounds:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aligned_quads_preserve_clipping_and_translucent_compositing() {
+        for bounds in [
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 80.0,
+                height: 60.0,
+            },
+            Rectangle {
+                x: -8.0,
+                y: -4.0,
+                width: 64.0,
+                height: 40.0,
+            },
+            Rectangle {
+                x: 8.0,
+                y: 4.0,
+                width: 64.0,
+                height: 40.0,
+            },
+        ] {
+            for opacity in [0.0, 0.4, 1.0] {
+                for clipped in [false, true] {
+                    let clip_bounds = if clipped {
+                        Rectangle {
+                            x: 4.0,
+                            y: 2.0,
+                            width: 64.0,
+                            height: 48.0,
+                        }
+                    } else {
+                        Rectangle {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 80.0,
+                            height: 60.0,
+                        }
+                    };
+                    let mut mask = tiny_skia::Mask::new(80, 60).unwrap();
+                    adjust_clip_mask(&mut mask, clip_bounds);
+                    let color = Color::from_rgba(0.7, 0.3, 0.2, opacity);
+                    let mut expected = tiny_skia::Pixmap::new(80, 60).unwrap();
+                    expected
+                        .fill(tiny_skia::Color::from_rgba8(25, 50, 75, 255));
+                    let mut actual = expected.clone();
+                    let path = rounded_rectangle(bounds, [0.0; 4]);
+                    expected.fill_path(
+                        &path,
+                        &tiny_skia::Paint {
+                            shader: tiny_skia::Shader::SolidColor(into_color(
+                                color,
+                            )),
+                            anti_alias: true,
+                            ..Default::default()
+                        },
+                        tiny_skia::FillRule::EvenOdd,
+                        tiny_skia::Transform::identity(),
+                        Some(&mask),
+                    );
+                    Engine::new().draw_quad(
+                        &Quad {
+                            bounds,
+                            ..Default::default()
+                        },
+                        &Background::Color(color),
+                        Transformation::IDENTITY,
+                        &mut actual.as_mut(),
+                        &mut mask,
+                        clip_bounds,
+                    );
+                    for (index, (actual, expected)) in
+                        actual.data().iter().zip(expected.data()).enumerate()
+                    {
+                        assert!(
+                            actual.abs_diff(*expected) <= 1,
+                            "pixel channel {index}: {actual} != {expected}; {bounds:?} {opacity} {clipped}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
