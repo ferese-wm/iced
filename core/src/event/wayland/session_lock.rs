@@ -4,6 +4,8 @@ use cctk::sctk::reexports::client::protocol::wl_surface::WlSurface;
 /// session lock events
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionLockEvent {
+    /// Lock request sent; lock surfaces can now be created.
+    Requested,
     /// Compositor has activated lock
     Locked,
     /// Lock rejected / canceled by compositor

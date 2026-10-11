@@ -178,6 +178,8 @@ pub enum SctkEvent {
     },
 
     /// session lock events
+    SessionLockRequested,
+    SessionLockNotSupported,
     SessionLocked,
     SessionLockFinished,
     SessionLockSurfaceCreated {
@@ -1198,6 +1200,22 @@ impl SctkEvent {
                 id: _,
                 inner_size: _,
             } => Default::default(),
+            SctkEvent::SessionLockRequested => events.push((
+                None,
+                iced_runtime::core::Event::PlatformSpecific(
+                    PlatformSpecific::Wayland(wayland::Event::SessionLock(
+                        wayland::SessionLockEvent::Requested,
+                    )),
+                ),
+            )),
+            SctkEvent::SessionLockNotSupported => events.push((
+                None,
+                iced_runtime::core::Event::PlatformSpecific(
+                    PlatformSpecific::Wayland(wayland::Event::SessionLock(
+                        wayland::SessionLockEvent::NotSupported,
+                    )),
+                ),
+            )),
             SctkEvent::SessionLocked => events.push((
                 None,
                 iced_runtime::core::Event::PlatformSpecific(
