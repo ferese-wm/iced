@@ -1588,9 +1588,17 @@ impl SctkState {
             Action::SessionLock(action) => match action {
                 platform_specific::wayland::session_lock::Action::Lock => {
                     if self.session_lock.is_none() {
-                        // TODO send message on error? When protocol doesn't exist.
-                        self.session_lock = self.session_lock_state.lock(&self.queue_handle).ok();
-                        send_event(&self.events_sender, &self.proxy, SctkEvent::SessionLocked);
+                        match self.session_lock_state.lock(&self.queue_handle) {
+                            Ok(lock) => {
+                                self.session_lock = Some(lock);
+                                // Only SessionLockHandler::locked confirms protection.
+                                send_event(&self.events_sender, &self.proxy, SctkEvent::SessionLockRequested);
+                            }
+                            Err(error) => {
+                                log::warn!("Cannot request session lock: {error}");
+                                send_event(&self.events_sender, &self.proxy, SctkEvent::SessionLockNotSupported);
+                            }
+                        }
                     }
                 }
                 platform_specific::wayland::session_lock::Action::Unlock => {
