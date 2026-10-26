@@ -47,6 +47,10 @@ type ColorFilter = Option<[u8; 4]>;
 impl Cache {
     /// Load svg
     pub fn load(&mut self, handle: &svg::Handle) -> &Svg {
+        // Layout measures alternatives that may never be drawn. They still use
+        // the parsed tree, so retain it through this frame's cache trim.
+        let _ = self.svg_hits.insert(handle.id());
+        self.should_trim = true;
         if self.svgs.contains_key(&handle.id()) {
             return self.svgs.get(&handle.id()).unwrap();
         }
@@ -83,8 +87,6 @@ impl Cache {
                 }
             }
         };
-
-        self.should_trim = true;
 
         let _ = self.svgs.insert(handle.id(), svg);
         self.svgs.get(&handle.id()).unwrap()
@@ -198,6 +200,10 @@ impl Cache {
 
     /// Load svg and upload raster data
     pub fn trim(&mut self, atlas: &mut Atlas) {
+        self.trim_with(|entry| atlas.remove(entry));
+    }
+
+    fn trim_with(&mut self, mut remove: impl FnMut(&atlas::Entry)) {
         if !self.should_trim {
             return;
         }
@@ -210,7 +216,7 @@ impl Cache {
             let retain = rasterized_hits.contains(k);
 
             if !retain {
-                atlas.remove(entry);
+                remove(entry);
             }
 
             retain
@@ -227,5 +233,59 @@ impl std::fmt::Debug for Svg {
             Svg::Loaded(_) => write!(f, "Svg::Loaded"),
             Svg::NotFound => write!(f, "Svg::NotFound"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn icon(width: u32) -> svg::Handle {
+        svg::Handle::from_memory(format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="24"><path d="M0 0L12 12"/></svg>"#
+        ).into_bytes())
+    }
+
+    #[test]
+    fn measured_alternatives_survive_trim_and_unused_trees_are_released() {
+        let mut cache = Cache {
+            fontdb: Some(Arc::new(usvg::fontdb::Database::new())),
+            ..Cache::default()
+        };
+        let measured = icon(24);
+        let other = icon(32);
+        for _ in 0..20 {
+            assert_eq!(
+                cache.load(&measured).viewport_dimensions(),
+                Size::new(24, 24)
+            );
+            cache.trim_with(|_| {
+                panic!("measurement must not allocate atlas entries")
+            });
+            assert!(cache.svgs.contains_key(&measured.id()));
+            assert!(cache.rasterized.is_empty());
+        }
+        let _ = cache.load(&other);
+        cache.trim_with(|_| {
+            panic!("measurement must not allocate atlas entries")
+        });
+        assert!(!cache.svgs.contains_key(&measured.id()));
+        assert!(cache.svgs.contains_key(&other.id()));
+        assert_eq!(cache.svgs.len(), 1);
+    }
+
+    #[test]
+    fn failed_measurements_are_cached_without_retaining_old_handles() {
+        let mut cache = Cache {
+            fontdb: Some(Arc::new(usvg::fontdb::Database::new())),
+            ..Cache::default()
+        };
+        let invalid = svg::Handle::from_memory(b"not an SVG".to_vec());
+        assert!(matches!(cache.load(&invalid), Svg::NotFound));
+        cache.trim_with(|_| {});
+        assert!(cache.svgs.contains_key(&invalid.id()));
+        let _ = cache.load(&icon(24));
+        cache.trim_with(|_| {});
+        assert!(!cache.svgs.contains_key(&invalid.id()));
     }
 }
