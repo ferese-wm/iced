@@ -1425,7 +1425,10 @@ async fn run_instance<P>(
                             &mut clipboard,
                             &mut messages,
                         );
-                    let mut needs_redraw = !messages.is_empty();
+                    // Messages rebuild the interfaces and request a redraw below.
+                    // Requesting it here as well can race the Wayland thread
+                    // and leave a second frame queued for the same update.
+                    let mut needs_redraw = false;
                     if let Some(requested_size) =
                         clipboard.requested_logical_size.lock().unwrap().take()
                     {
