@@ -599,6 +599,16 @@ where
     where
         Renderer: core::Renderer,
     {
+        #[cfg(feature = "a11y")]
+        fn a11y_nodes(
+            &self,
+            layout: Layout<'_>,
+            tree: &Tree,
+            cursor: mouse::Cursor,
+        ) -> iced_accessibility::A11yTree {
+            self.content.as_widget().a11y_nodes(layout, tree, cursor)
+        }
+
         fn tag(&self) -> tree::Tag {
             self.content.as_widget().tag()
         }
@@ -2121,4 +2131,78 @@ where
     Renderer: core::Renderer,
 {
     Responsive::new(f)
+}
+
+#[cfg(all(test, feature = "a11y"))]
+mod accessibility_tests {
+    use super::*;
+    use crate::core::{Layout, Size, layout, mouse, renderer, widget::Tree};
+    use iced_accessibility::{
+        A11yTree,
+        accesskit::{Node, Role},
+    };
+
+    struct Named(&'static str);
+    impl Widget<(), (), ()> for Named {
+        fn size(&self) -> Size<Length> {
+            Size::new(Length::Fixed(20.), Length::Fixed(20.))
+        }
+        fn layout(
+            &mut self,
+            _: &mut Tree,
+            _: &(),
+            _: &layout::Limits,
+        ) -> layout::Node {
+            layout::Node::new(Size::new(20., 20.))
+        }
+        fn draw(
+            &self,
+            _: &Tree,
+            _: &mut (),
+            _: &(),
+            _: &renderer::Style,
+            _: Layout<'_>,
+            _: mouse::Cursor,
+            _: &crate::core::Rectangle,
+        ) {
+        }
+        fn a11y_nodes(
+            &self,
+            _: Layout<'_>,
+            _: &Tree,
+            _: mouse::Cursor,
+        ) -> A11yTree {
+            let mut node = Node::new(Role::Button);
+            node.set_label(self.0);
+            A11yTree::leaf(node, crate::core::widget::Id::new(self.0))
+        }
+    }
+
+    #[test]
+    fn stacked_opaque_keyed_content_preserves_accessible_descendants() {
+        let column = keyed_column([
+            (1u32, Element::new(Named("first"))),
+            (2u32, Element::new(Named("second"))),
+        ]);
+        let mut content: Element<'_, (), (), ()> =
+            stack([Element::new(Named("backdrop")), opaque(column)]).into();
+        let mut tree = Tree::new(&content);
+        let layout = content.as_widget_mut().layout(
+            &mut tree,
+            &(),
+            &layout::Limits::new(Size::ZERO, Size::new(200., 200.)),
+        );
+        let accessible = content.as_widget().a11y_nodes(
+            Layout::new(&layout),
+            &tree,
+            mouse::Cursor::Unavailable,
+        );
+        let labels = accessible
+            .root()
+            .iter()
+            .chain(accessible.children())
+            .filter_map(|n| n.node().label())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, ["backdrop", "first", "second"]);
+    }
 }
